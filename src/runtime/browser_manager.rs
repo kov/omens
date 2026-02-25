@@ -309,10 +309,9 @@ impl BrowserManager {
     }
 
     fn archive_path(&self, build: u64) -> PathBuf {
-        self.chromium_dir().join("cache").join(format!(
-            "chrome-{}-{build}.zip",
-            self.platform.as_str()
-        ))
+        self.chromium_dir()
+            .join("cache")
+            .join(format!("chrome-{}-{build}.zip", self.platform.as_str()))
     }
 
     fn download_archive(&self, url: &str, archive_path: &Path) -> Result<(), String> {
@@ -735,8 +734,7 @@ fn create_symlink_dir(target: &Path, link_path: &Path) -> Result<(), String> {
 mod tests {
     use super::{
         ArtifactSource, BrowserManager, BrowserMode, ChromiumPlatform, chromium_download_url,
-        detect_platform,
-        find_manifest_url_for_revision, parse_lock_metadata,
+        detect_platform, find_manifest_url_for_revision, parse_lock_metadata,
     };
     use crate::config::OmensConfig;
     use std::fs;
@@ -1009,5 +1007,4 @@ mod tests {
             .expect("url should be found");
         assert_eq!(url, "https://example/chrome-linux64.zip");
     }
-
 }

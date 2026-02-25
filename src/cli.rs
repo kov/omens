@@ -2,7 +2,9 @@ use crate::auth::{self, AuthError, AuthValidationConfig, EphemeralProfile};
 use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
 use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
+use crate::runtime::display_manager::DisplayManager;
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 pub const EX_FATAL: i32 = 40;
@@ -40,7 +42,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
     let command = Command::parse(args).map_err(CliError::fatal)?;
 
     match command {
-        Command::AuthBootstrap { ephemeral } => auth_bootstrap(ephemeral),
+        Command::AuthBootstrap { ephemeral, display } => auth_bootstrap(ephemeral, display),
         Command::ExploreStart => noop("explore start"),
         Command::ExploreReview => noop("explore review"),
         Command::ExplorePromote { recipe_id } => noop(&format!("explore promote {recipe_id}")),
@@ -51,6 +53,12 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::BrowserUpgrade => browser_upgrade(),
         Command::BrowserRollback => browser_rollback(),
         Command::BrowserResetProfile => browser_reset_profile(),
+        Command::DisplayStart {
+            listen_addr,
+            password_file,
+        } => display_start(listen_addr, password_file),
+        Command::DisplayStop => display_stop(),
+        Command::DisplayStatus => display_status(),
         Command::ConfigDoctor => config_doctor(),
         Command::Help { topic } => {
             print_usage(topic);
@@ -64,7 +72,7 @@ fn noop(name: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn auth_bootstrap(ephemeral: bool) -> Result<(), CliError> {
+fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
@@ -90,8 +98,22 @@ fn auth_bootstrap(ephemeral: bool) -> Result<(), CliError> {
         ephemeral_profile = None;
     }
 
-    let mut harness =
-        ChromiumoxideHarness::new(browser_binary, profile_path.clone()).map_err(CliError::fatal)?;
+    let mut launch_env = Vec::<(String, String)>::new();
+    if display {
+        let manager = DisplayManager::new(&loaded.resolved.root_dir);
+        let status = manager.status().map_err(CliError::fatal)?;
+        let session = status.session.ok_or_else(|| {
+            CliError::fatal("display session is not running; run `omens display start`")
+        })?;
+        launch_env.push((
+            "XDG_RUNTIME_DIR".to_string(),
+            session.runtime_dir.display().to_string(),
+        ));
+        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+    }
+
+    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path.clone(), launch_env)
+        .map_err(CliError::fatal)?;
     harness
         .launch(loaded.clubefii.login_url.as_str())
         .map_err(CliError::fatal)?;
@@ -224,6 +246,51 @@ fn browser_reset_profile() -> Result<(), CliError> {
     Ok(())
 }
 
+fn display_start(listen_addr: String, password_file: Option<PathBuf>) -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+    let manager = DisplayManager::new(&loaded.resolved.root_dir);
+    let password = password_file
+        .as_ref()
+        .map(|p| p.as_os_str().to_string_lossy());
+    let session = manager
+        .start(listen_addr.as_str(), password.as_deref())
+        .map_err(CliError::fatal)?;
+    println!("display start");
+    println!("  listen_addr: {}", session.listen_addr);
+    println!("  runtime_dir: {}", session.runtime_dir.display());
+    println!("  wayland_socket: {}", session.wayland_socket);
+    println!("  weston_pid: {}", session.weston_pid);
+    println!("  wayvnc_pid: {}", session.wayvnc_pid);
+    Ok(())
+}
+
+fn display_stop() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    let manager = DisplayManager::new(&loaded.resolved.root_dir);
+    manager.stop().map_err(CliError::fatal)?;
+    println!("display stop: session terminated");
+    Ok(())
+}
+
+fn display_status() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    let manager = DisplayManager::new(&loaded.resolved.root_dir);
+    let status = manager.status().map_err(CliError::fatal)?;
+    println!("display status");
+    if let Some(session) = status.session {
+        println!("  running: {}", if status.running { "yes" } else { "no" });
+        println!("  listen_addr: {}", session.listen_addr);
+        println!("  runtime_dir: {}", session.runtime_dir.display());
+        println!("  wayland_socket: {}", session.wayland_socket);
+        println!("  weston_pid: {}", session.weston_pid);
+        println!("  wayvnc_pid: {}", session.wayvnc_pid);
+    } else {
+        println!("  running: no");
+    }
+    Ok(())
+}
+
 fn print_browser_status_result(title: &str, status: &BrowserInstallState) {
     println!("{title}");
     println!(
@@ -279,17 +346,18 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Root => {
             println!(
                 "Usage:\n  \
-  omens auth bootstrap [--ephemeral]\n  \
+  omens auth bootstrap [--ephemeral] [--display]\n  \
   omens explore start\n  \
   omens explore review\n  \
   omens explore promote <recipe_id>\n  \
   omens collect run [--sections csv]\n  \
   omens report latest\n  \
   omens config doctor\n  \
-  omens browser status|install|upgrade|rollback|reset-profile"
+  omens browser status|install|upgrade|rollback|reset-profile\n  \
+  omens display start|stop|status"
             );
         }
-        HelpTopic::Auth => println!("Usage:\n  omens auth bootstrap [--ephemeral]"),
+        HelpTopic::Auth => println!("Usage:\n  omens auth bootstrap [--ephemeral] [--display]"),
         HelpTopic::Explore => {
             println!(
                 "Usage:\n  omens explore start\n  omens explore review\n  omens explore promote <recipe_id>"
@@ -301,6 +369,9 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Browser => {
             println!("Usage:\n  omens browser status|install|upgrade|rollback|reset-profile")
         }
+        HelpTopic::Display => println!(
+            "Usage:\n  omens display start [--listen addr:port] [--password-file path]\n  omens display stop\n  omens display status"
+        ),
     }
 }
 
@@ -313,14 +384,22 @@ enum HelpTopic {
     Report,
     Config,
     Browser,
+    Display,
 }
 
 enum Command {
-    AuthBootstrap { ephemeral: bool },
+    AuthBootstrap {
+        ephemeral: bool,
+        display: bool,
+    },
     ExploreStart,
     ExploreReview,
-    ExplorePromote { recipe_id: String },
-    CollectRun { sections: String },
+    ExplorePromote {
+        recipe_id: String,
+    },
+    CollectRun {
+        sections: String,
+    },
     ReportLatest,
     ConfigDoctor,
     BrowserStatus,
@@ -328,7 +407,15 @@ enum Command {
     BrowserUpgrade,
     BrowserRollback,
     BrowserResetProfile,
-    Help { topic: HelpTopic },
+    DisplayStart {
+        listen_addr: String,
+        password_file: Option<PathBuf>,
+    },
+    DisplayStop,
+    DisplayStatus,
+    Help {
+        topic: HelpTopic,
+    },
 }
 
 impl Command {
@@ -358,6 +445,7 @@ impl Command {
             "report" => parse_report(args),
             "config" => parse_config(args),
             "browser" => parse_browser(args),
+            "display" => parse_display(args),
             _ => Err("unknown command. run `omens --help`".to_string()),
         }
     }
@@ -372,6 +460,7 @@ fn parse_help_topic(raw: Option<&str>) -> Result<HelpTopic, String> {
         Some("report") => Ok(HelpTopic::Report),
         Some("config") => Ok(HelpTopic::Config),
         Some("browser") => Ok(HelpTopic::Browser),
+        Some("display") => Ok(HelpTopic::Display),
         Some(other) => Err(format!("unknown help topic `{other}`")),
     }
 }
@@ -382,13 +471,21 @@ fn parse_auth(args: &[String]) -> Result<Command, String> {
             topic: HelpTopic::Auth,
         });
     }
-    if args.len() == 3 && args[2] == "bootstrap" {
-        return Ok(Command::AuthBootstrap { ephemeral: false });
+    if args.len() >= 3 && args[2] == "bootstrap" {
+        let mut ephemeral = false;
+        let mut display = false;
+        for arg in args.iter().skip(3) {
+            match arg.as_str() {
+                "--ephemeral" => ephemeral = true,
+                "--display" => display = true,
+                _ => {
+                    return Err("usage: omens auth bootstrap [--ephemeral] [--display]".to_string());
+                }
+            }
+        }
+        return Ok(Command::AuthBootstrap { ephemeral, display });
     }
-    if args.len() == 4 && args[2] == "bootstrap" && args[3] == "--ephemeral" {
-        return Ok(Command::AuthBootstrap { ephemeral: true });
-    }
-    Err("usage: omens auth bootstrap [--ephemeral]".to_string())
+    Err("usage: omens auth bootstrap [--ephemeral] [--display]".to_string())
 }
 
 fn parse_explore(args: &[String]) -> Result<Command, String> {
@@ -476,6 +573,55 @@ fn parse_browser(args: &[String]) -> Result<Command, String> {
     }
 }
 
+fn parse_display(args: &[String]) -> Result<Command, String> {
+    if args.len() == 3 && is_help(args[2].as_str()) {
+        return Ok(Command::Help {
+            topic: HelpTopic::Display,
+        });
+    }
+    if args.len() == 3 && args[2] == "stop" {
+        return Ok(Command::DisplayStop);
+    }
+    if args.len() == 3 && args[2] == "status" {
+        return Ok(Command::DisplayStatus);
+    }
+    if args.len() >= 3 && args[2] == "start" {
+        let mut listen_addr = "127.0.0.1:5900".to_string();
+        let mut password_file = None::<PathBuf>;
+        let mut i = 3usize;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--listen" => {
+                    let value = args
+                        .get(i + 1)
+                        .ok_or_else(|| "missing value after --listen".to_string())?;
+                    listen_addr = value.clone();
+                    i += 2;
+                }
+                "--password-file" => {
+                    let value = args
+                        .get(i + 1)
+                        .ok_or_else(|| "missing value after --password-file".to_string())?;
+                    password_file = Some(PathBuf::from(value));
+                    i += 2;
+                }
+                _ => {
+                    return Err(
+                        "usage: omens display start [--listen addr:port] [--password-file path]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        return Ok(Command::DisplayStart {
+            listen_addr,
+            password_file,
+        });
+    }
+
+    Err("usage: omens display start|stop|status".to_string())
+}
+
 fn is_help(value: &str) -> bool {
     value == "--help" || value == "-h"
 }
@@ -507,7 +653,22 @@ mod tests {
         assert!(matches!(
             Command::parse(&to_args(&["omens", "auth", "bootstrap", "--ephemeral"]))
                 .expect("auth should parse"),
-            Command::AuthBootstrap { ephemeral: true }
+            Command::AuthBootstrap {
+                ephemeral: true,
+                display: false
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_auth_display_flag() {
+        assert!(matches!(
+            Command::parse(&to_args(&["omens", "auth", "bootstrap", "--display"]))
+                .expect("auth should parse"),
+            Command::AuthBootstrap {
+                ephemeral: false,
+                display: true
+            }
         ));
     }
 
@@ -530,6 +691,33 @@ mod tests {
                 topic: HelpTopic::Browser
             }
         ));
+    }
+
+    #[test]
+    fn parse_display_start_with_options() {
+        let command = Command::parse(&to_args(&[
+            "omens",
+            "display",
+            "start",
+            "--listen",
+            "0.0.0.0:5900",
+            "--password-file",
+            "/tmp/vnc.pass",
+        ]))
+        .expect("display start should parse");
+        match command {
+            Command::DisplayStart {
+                listen_addr,
+                password_file,
+            } => {
+                assert_eq!(listen_addr, "0.0.0.0:5900");
+                assert_eq!(
+                    password_file.map(|p| p.display().to_string()),
+                    Some("/tmp/vnc.pass".to_string())
+                );
+            }
+            _ => panic!("unexpected command variant"),
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub trait BrowserHarness {
 pub struct ChromiumoxideHarness {
     browser_binary: PathBuf,
     profile_dir: PathBuf,
+    launch_env: Vec<(String, String)>,
     runtime: tokio::runtime::Runtime,
     browser: Option<Browser>,
     page: Option<Page>,
@@ -21,7 +22,11 @@ pub struct ChromiumoxideHarness {
 }
 
 impl ChromiumoxideHarness {
-    pub fn new(browser_binary: PathBuf, profile_dir: PathBuf) -> Result<Self, String> {
+    pub fn new(
+        browser_binary: PathBuf,
+        profile_dir: PathBuf,
+        launch_env: Vec<(String, String)>,
+    ) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_io()
             .enable_time()
@@ -31,6 +36,7 @@ impl ChromiumoxideHarness {
         Ok(Self {
             browser_binary,
             profile_dir,
+            launch_env,
             runtime,
             browser: None,
             page: None,
@@ -47,10 +53,14 @@ impl ChromiumoxideHarness {
 
 impl BrowserHarness for ChromiumoxideHarness {
     fn launch(&mut self, url: &str) -> Result<(), String> {
-        let config = BrowserConfig::builder()
+        let mut builder = BrowserConfig::builder()
             .chrome_executable(&self.browser_binary)
             .user_data_dir(&self.profile_dir)
-            .with_head()
+            .with_head();
+        for (key, value) in &self.launch_env {
+            builder = builder.env(key.clone(), value.clone());
+        }
+        let config = builder
             .build()
             .map_err(|err| format!("failed to build browser config: {err}"))?;
 
