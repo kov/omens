@@ -1,7 +1,5 @@
 use crate::auth::{self, AuthError, AuthValidationConfig, EphemeralProfile};
-use crate::browser::harness::{
-    BrowserHarness, CommandBrowserHarness, write_mock_current_url, write_mock_marker,
-};
+use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
 use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
 use std::io;
@@ -92,7 +90,8 @@ fn auth_bootstrap(ephemeral: bool) -> Result<(), CliError> {
         ephemeral_profile = None;
     }
 
-    let mut harness = CommandBrowserHarness::new(browser_binary, profile_path.clone());
+    let mut harness =
+        ChromiumoxideHarness::new(browser_binary, profile_path.clone()).map_err(CliError::fatal)?;
     harness
         .launch(loaded.clubefii.login_url.as_str())
         .map_err(CliError::fatal)?;
@@ -106,14 +105,6 @@ fn auth_bootstrap(ephemeral: bool) -> Result<(), CliError> {
     io::stdin()
         .read_line(&mut line)
         .map_err(|err| CliError::fatal(format!("failed reading confirmation input: {err}")))?;
-
-    // We cannot query browser tab URL directly yet, so we record a successful callback URL hint
-    // after user confirmation. Marker/probe checks still run if configured.
-    write_mock_current_url(&profile_path, loaded.clubefii.base_url.as_str())
-        .map_err(CliError::fatal)?;
-    if let Some(marker) = loaded.clubefii.auth_marker.as_deref() {
-        write_mock_marker(&profile_path, marker).map_err(CliError::fatal)?;
-    }
 
     let auth_config = AuthValidationConfig {
         base_url: loaded.clubefii.base_url.clone(),
