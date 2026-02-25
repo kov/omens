@@ -57,13 +57,6 @@ struct ChromiumLockMetadata {
 struct ArtifactSource {
     url: String,
     expected_sha256: Option<String>,
-    format: ArtifactFormat,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArtifactFormat {
-    Zip,
-    Deb,
 }
 
 pub struct BrowserManager {
@@ -241,7 +234,7 @@ impl BrowserManager {
         self.set_link_target(&status_before.current_path, &install_root)?;
         self.maybe_clear_macos_quarantine(&install_root)?;
 
-        let checksum = compute_sha256(&self.archive_path(build, source.format))?;
+        let checksum = compute_sha256(&self.archive_path(build))?;
         self.write_lock_metadata(
             Some(build),
             Some(source.url.as_str()),
@@ -257,7 +250,7 @@ impl BrowserManager {
         source: &ArtifactSource,
         build_dir: &Path,
     ) -> Result<(), String> {
-        let archive_path = self.archive_path(build, source.format);
+        let archive_path = self.archive_path(build);
         self.download_archive(source.url.as_str(), &archive_path)?;
 
         let actual_checksum = compute_sha256(&archive_path)?;
@@ -272,7 +265,7 @@ impl BrowserManager {
             }
         }
 
-        self.extract_archive(&archive_path, build_dir, source.format)
+        self.extract_archive(&archive_path, build_dir)
     }
 
     fn resolve_artifact_source(&self, build: u64) -> Result<ArtifactSource, String> {
@@ -281,18 +274,7 @@ impl BrowserManager {
             return Ok(ArtifactSource {
                 url,
                 expected_sha256,
-                format: ArtifactFormat::Zip,
             });
-        }
-
-        if cfg!(target_os = "linux") && std::env::consts::ARCH == "aarch64" {
-            if let Some(url) = debian_trixie_arm64_chromium_url()? {
-                return Ok(ArtifactSource {
-                    url,
-                    expected_sha256: None,
-                    format: ArtifactFormat::Deb,
-                });
-            }
         }
 
         let url = chromium_download_url(build, self.platform);
@@ -300,7 +282,6 @@ impl BrowserManager {
         Ok(ArtifactSource {
             url,
             expected_sha256,
-            format: ArtifactFormat::Zip,
         })
     }
 
@@ -327,13 +308,9 @@ impl BrowserManager {
         Ok(checksum)
     }
 
-    fn archive_path(&self, build: u64, format: ArtifactFormat) -> PathBuf {
-        let extension = match format {
-            ArtifactFormat::Zip => "zip",
-            ArtifactFormat::Deb => "deb",
-        };
+    fn archive_path(&self, build: u64) -> PathBuf {
         self.chromium_dir().join("cache").join(format!(
-            "chrome-{}-{build}.{extension}",
+            "chrome-{}-{build}.zip",
             self.platform.as_str()
         ))
     }
@@ -393,36 +370,7 @@ impl BrowserManager {
         ))
     }
 
-    fn extract_archive(
-        &self,
-        archive_path: &Path,
-        destination: &Path,
-        format: ArtifactFormat,
-    ) -> Result<(), String> {
-        if format == ArtifactFormat::Deb {
-            let status = Command::new("dpkg-deb")
-                .arg("-x")
-                .arg(archive_path)
-                .arg(destination)
-                .status()
-                .map_err(|err| {
-                    format!(
-                        "failed to start dpkg-deb for {}: {err}",
-                        archive_path.display()
-                    )
-                })?;
-
-            if !status.success() {
-                return Err(format!(
-                    "failed to extract Debian package {} (exit code {:?})",
-                    archive_path.display(),
-                    status.code()
-                ));
-            }
-
-            return Ok(());
-        }
-
+    fn extract_archive(&self, archive_path: &Path, destination: &Path) -> Result<(), String> {
         let status = Command::new("unzip")
             .arg("-q")
             .arg(archive_path)
@@ -572,12 +520,7 @@ impl BrowserManager {
 }
 
 fn resolve_install_root(build_dir: &Path) -> Result<PathBuf, String> {
-    let expected = [
-        "chrome-linux64",
-        "chrome-mac-arm64",
-        "chrome-mac-x64",
-        "usr/lib/chromium",
-    ];
+    let expected = ["chrome-linux64", "chrome-mac-arm64", "chrome-mac-x64"];
     for entry in expected {
         let candidate = build_dir.join(entry);
         if candidate.exists() {
@@ -646,35 +589,6 @@ fn manifest_download_url(build: u64, platform: ChromiumPlatform) -> Result<Optio
         build,
         platform.as_str(),
     ))
-}
-
-fn debian_trixie_arm64_chromium_url() -> Result<Option<String>, String> {
-    let response = match http_client()?
-        .get("https://packages.debian.org/trixie/arm64/chromium/download")
-        .send()
-    {
-        Ok(response) => response,
-        Err(_) => return Ok(None),
-    };
-    if !response.status().is_success() {
-        return Ok(None);
-    }
-
-    let text = response
-        .text()
-        .map_err(|err| format!("failed to read Debian package page body: {err}"))?;
-    Ok(find_debian_deb_url(text.as_str()))
-}
-
-fn find_debian_deb_url(page: &str) -> Option<String> {
-    let marker = "https://deb.debian.org/debian/pool/main/c/chromium/";
-    let start = page.find(marker)?;
-    let tail = &page[start..];
-    if let Some(end) = tail.find("_arm64.deb") {
-        return Some(format!("{}{}", &tail[..end], "_arm64.deb"));
-    }
-    let end = tail.find(".deb\"")?;
-    Some(tail[..end + 4].to_string())
 }
 
 fn find_manifest_url_for_revision(manifest: &str, revision: u64, platform: &str) -> Option<String> {
@@ -820,8 +734,8 @@ fn create_symlink_dir(target: &Path, link_path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactFormat, ArtifactSource, BrowserManager, BrowserMode, ChromiumPlatform,
-        chromium_download_url, detect_platform, find_debian_deb_url,
+        ArtifactSource, BrowserManager, BrowserMode, ChromiumPlatform, chromium_download_url,
+        detect_platform,
         find_manifest_url_for_revision, parse_lock_metadata,
     };
     use crate::config::OmensConfig;
@@ -887,7 +801,6 @@ mod tests {
         let source = ArtifactSource {
             url: format!("file://{}", archive_path.display()),
             expected_sha256: None,
-            format: ArtifactFormat::Zip,
         };
         manager.finalize_install(build, &source).map(|_| ())
     }
@@ -1008,7 +921,6 @@ mod tests {
         let source = ArtifactSource {
             url: "https://example.invalid/not-found.zip".to_string(),
             expected_sha256: None,
-            format: ArtifactFormat::Zip,
         };
 
         let err = manager
@@ -1036,7 +948,6 @@ mod tests {
         let source = ArtifactSource {
             url: format!("file://{}", archive.display()),
             expected_sha256: Some("deadbeef".to_string()),
-            format: ArtifactFormat::Zip,
         };
 
         let err = manager
@@ -1099,18 +1010,4 @@ mod tests {
         assert_eq!(url, "https://example/chrome-linux64.zip");
     }
 
-    #[test]
-    fn debian_fallback_url_parser_finds_arm64_deb_link() {
-        let page = r#"
-            <html><body>
-              <a href="https://deb.debian.org/debian/pool/main/c/chromium/chromium_142.0.7444.162-1_arm64.deb">mirror</a>
-            </body></html>
-        "#;
-
-        let url = find_debian_deb_url(page).expect("debian .deb url should be found");
-        assert_eq!(
-            url,
-            "https://deb.debian.org/debian/pool/main/c/chromium/chromium_142.0.7444.162-1_arm64.deb"
-        );
-    }
 }
