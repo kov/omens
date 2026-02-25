@@ -13,10 +13,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Command::CollectRun { sections } => noop(&format!("collect run --sections {sections}")),
         Command::ReportLatest => noop("report latest"),
         Command::BrowserStatus => browser_status(),
-        Command::BrowserInstall => noop("browser install"),
-        Command::BrowserUpgrade => noop("browser upgrade"),
-        Command::BrowserRollback => noop("browser rollback"),
-        Command::BrowserResetProfile => noop("browser reset-profile"),
+        Command::BrowserInstall => browser_install(),
+        Command::BrowserUpgrade => browser_upgrade(),
+        Command::BrowserRollback => browser_rollback(),
+        Command::BrowserResetProfile => browser_reset_profile(),
         Command::ConfigDoctor => config_doctor(),
         Command::Help { topic } => {
             print_usage(topic);
@@ -89,6 +89,69 @@ fn browser_status() -> Result<(), String> {
     println!("  download_url: {}", status.download_url);
 
     Ok(())
+}
+
+fn browser_install() -> Result<(), String> {
+    let loaded = config::load_default_config()?;
+    config::bootstrap_layout(&loaded)?;
+    let manager = BrowserManager::from_config(&loaded)?;
+    let status = manager.install()?;
+    print_browser_status_result("browser install", &status);
+    Ok(())
+}
+
+fn browser_upgrade() -> Result<(), String> {
+    let loaded = config::load_default_config()?;
+    config::bootstrap_layout(&loaded)?;
+    let manager = BrowserManager::from_config(&loaded)?;
+    let status = manager.upgrade()?;
+    print_browser_status_result("browser upgrade", &status);
+    Ok(())
+}
+
+fn browser_rollback() -> Result<(), String> {
+    let loaded = config::load_default_config()?;
+    config::bootstrap_layout(&loaded)?;
+    let manager = BrowserManager::from_config(&loaded)?;
+    let status = manager.rollback()?;
+    print_browser_status_result("browser rollback", &status);
+    Ok(())
+}
+
+fn browser_reset_profile() -> Result<(), String> {
+    let loaded = config::load_default_config()?;
+    config::bootstrap_layout(&loaded)?;
+    let manager = BrowserManager::from_config(&loaded)?;
+    manager.reset_profile()?;
+    println!(
+        "browser reset-profile completed: {}",
+        loaded.resolved.browser_user_data_dir.display()
+    );
+    Ok(())
+}
+
+fn print_browser_status_result(
+    title: &str,
+    status: &crate::runtime::browser_manager::BrowserInstallState,
+) {
+    println!("{title}");
+    println!(
+        "  active_build: {}",
+        status
+            .active_build
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!(
+        "  rollback_available: {}",
+        if status.rollback_available {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    println!("  current_path: {}", status.current_path.display());
+    println!("  metadata_path: {}", status.lock_path.display());
 }
 
 fn print_config(config: &OmensConfig) {
