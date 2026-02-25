@@ -3,11 +3,13 @@ use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
 use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
 use crate::runtime::display_manager::DisplayManager;
+use crate::store::{self, LockError, RunStatus, Store};
 use std::io;
 use std::time::{Duration, SystemTime};
 
 pub const EX_FATAL: i32 = 40;
 pub const EX_AUTH_REQUIRED: i32 = 20;
+pub const EX_LOCK_CONFLICT: i32 = 30;
 
 #[derive(Debug, Clone)]
 pub struct CliError {
@@ -29,6 +31,13 @@ impl CliError {
             message: message.into(),
         }
     }
+
+    fn lock_conflict(message: impl Into<String>) -> Self {
+        Self {
+            code: EX_LOCK_CONFLICT,
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for CliError {
@@ -45,7 +54,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::ExploreStart => noop("explore start"),
         Command::ExploreReview => noop("explore review"),
         Command::ExplorePromote { recipe_id } => noop(&format!("explore promote {recipe_id}")),
-        Command::CollectRun { sections } => noop(&format!("collect run --sections {sections}")),
+        Command::CollectRun { sections } => collect_run(sections),
         Command::ReportLatest => noop("report latest"),
         Command::BrowserStatus => browser_status(),
         Command::BrowserInstall => browser_install(),
@@ -139,6 +148,62 @@ fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
 
     result?;
     println!("auth bootstrap: session validation passed");
+    Ok(())
+}
+
+fn collect_run(sections: String) -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let _lock = match store::acquire_collect_lock(&loaded.resolved.storage_lock_path) {
+        Ok(lock) => lock,
+        Err(LockError::Contended(message)) => return Err(CliError::lock_conflict(message)),
+        Err(LockError::Runtime(message)) => return Err(CliError::fatal(message)),
+    };
+
+    let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
+    store.migrate().map_err(CliError::fatal)?;
+
+    let started = store::now_epoch_seconds().map_err(CliError::fatal)?;
+    let run_id = store
+        .start_run(sections.as_str(), started)
+        .map_err(CliError::fatal)?;
+
+    let collect_result: Result<(), String> = Ok(());
+    let ended = store::now_epoch_seconds().map_err(CliError::fatal)?;
+    match collect_result {
+        Ok(()) => store
+            .finish_run(run_id, RunStatus::Success, ended, None)
+            .map_err(CliError::fatal)?,
+        Err(err) => {
+            let _ = store.finish_run(run_id, RunStatus::Failed, ended, Some(err.as_str()));
+            return Err(CliError::fatal(err));
+        }
+    }
+    let persisted = store
+        .run_row(run_id)
+        .map_err(CliError::fatal)?
+        .ok_or_else(|| CliError::fatal(format!("run row {run_id} not found after finalize")))?;
+    let retention = store
+        .build_retention_plan(
+            ended,
+            loaded.storage.retention.keep_runs_days,
+            loaded.storage.retention.keep_versions_per_item,
+        )
+        .map_err(CliError::fatal)?;
+
+    println!("collect run");
+    println!("  run_id: {run_id}");
+    println!("  sections: {sections}");
+    println!("  db_path: {}", loaded.resolved.storage_db_path.display());
+    println!("  status: success");
+    println!("  persisted_status: {}", persisted.0);
+    println!(
+        "  retention_candidates: runs={}, versions={}",
+        retention.run_ids_to_delete.len(),
+        retention.version_ids_to_delete.len()
+    );
+    println!("  note: collection pipeline is not wired yet; run record persisted");
     Ok(())
 }
 

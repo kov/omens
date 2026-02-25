@@ -9,7 +9,7 @@ Last updated: 2026-02-25
 - [x] Phase 2b started
 - [x] Phase 2b completed
 - [x] Phase 3 started
-- [ ] Phase 4 started
+- [x] Phase 4 started
 - [ ] Phase 5 started
 - [ ] Phase 6 started
 - [ ] Phase 7 started
@@ -45,6 +45,12 @@ Last updated: 2026-02-25
 - Added dedicated remote display session manager (`weston` RDP backend) and CLI commands: `omens display start|stop|status`.
 - Added `omens auth bootstrap --display` mode to launch browser inside the managed remote display session.
 - Added automatic local TLS certificate/key generation for Weston RDP startup so managed display sessions can run without manual key provisioning.
+- Added SQLite storage core module with schema migrations for `runs`, `items`, `item_versions`, `signals`, `recipes`, and `item_key_aliases`.
+- Added collect-run process lock acquisition using configured lock path with dedicated lock contention error mapping.
+- Wired `collect run` to initialize storage, persist run start/end lifecycle records, and report persisted run metadata.
+- Added retention planning helper that computes candidate run/version deletions from `keep_runs_days` and `keep_versions_per_item` settings.
+- Added tests for migration idempotency, lock contention behavior, run lifecycle transitions, and retention version-keep logic.
 
 ## Next Items
-- Add collect-path preflight auth validation and `EX_AUTH_REQUIRED` handling.
+- Apply retention plans during real collection execution once extractor/storage wiring lands.
+- Implement extraction/normalization pipeline and persist `items` / `item_versions` / `signals` during `collect run`.

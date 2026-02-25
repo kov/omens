@@ -3,6 +3,7 @@ mod browser;
 mod cli;
 mod config;
 mod runtime;
+mod store;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
