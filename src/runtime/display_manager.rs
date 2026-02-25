@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub struct DisplaySession {
     pub weston_pid: u32,
-    pub wayvnc_pid: u32,
     pub runtime_dir: PathBuf,
     pub wayland_socket: String,
     pub listen_addr: String,
@@ -23,7 +22,8 @@ pub struct DisplayManager {
     display_dir: PathBuf,
     state_file: PathBuf,
     weston_log: PathBuf,
-    wayvnc_log: PathBuf,
+    rdp_tls_cert: PathBuf,
+    rdp_tls_key: PathBuf,
 }
 
 impl DisplayManager {
@@ -32,26 +32,19 @@ impl DisplayManager {
         Self {
             state_file: display_dir.join("session.state"),
             weston_log: display_dir.join("weston.log"),
-            wayvnc_log: display_dir.join("wayvnc.log"),
+            rdp_tls_cert: display_dir.join("rdp-tls.crt"),
+            rdp_tls_key: display_dir.join("rdp-tls.key"),
             display_dir,
         }
     }
 
-    pub fn start(
-        &self,
-        listen_addr: &str,
-        password_file: Option<&str>,
-    ) -> Result<DisplaySession, String> {
+    pub fn start(&self, listen_addr: &str) -> Result<DisplaySession, String> {
         self.ensure_display_dir()?;
 
         if let Some(existing) = self.read_state()? {
-            if self.is_alive(existing.weston_pid) && self.is_alive(existing.wayvnc_pid) {
+            if self.is_alive(existing.weston_pid) {
                 return Err("display session already running".to_string());
             }
-        }
-
-        if !listen_addr.starts_with("127.0.0.1:") && password_file.is_none() {
-            return Err("non-local display bind requires --password-file for wayvnc".to_string());
         }
 
         let runtime_dir = self.display_dir.join("runtime");
@@ -72,6 +65,8 @@ impl DisplayManager {
         }
 
         let wayland_socket = "omens-wayland-0".to_string();
+        let (bind_addr, bind_port) = parse_listen_addr(listen_addr)?;
+        self.ensure_rdp_tls_material()?;
 
         let weston_log = fs::OpenOptions::new()
             .create(true)
@@ -85,8 +80,12 @@ impl DisplayManager {
         let mut weston_cmd = Command::new("weston");
         weston_cmd
             .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .arg("--backend=headless")
+            .arg("--backend=rdp")
             .arg(format!("--socket={wayland_socket}"))
+            .arg(format!("--address={bind_addr}"))
+            .arg(format!("--port={bind_port}"))
+            .arg(format!("--rdp-tls-cert={}", self.rdp_tls_cert.display()))
+            .arg(format!("--rdp-tls-key={}", self.rdp_tls_key.display()))
             .arg("--idle-time=0")
             .stdout(Stdio::from(weston_log))
             .stderr(Stdio::from(weston_log_err));
@@ -98,6 +97,11 @@ impl DisplayManager {
         let wayland_socket_path = runtime_dir.join(&wayland_socket);
         let deadline = Instant::now() + Duration::from_secs(8);
         while !wayland_socket_path.exists() {
+            if !self.is_alive(weston_child.id()) {
+                return Err(
+                    "weston exited before creating wayland socket; check display logs".to_string(),
+                );
+            }
             if Instant::now() >= deadline {
                 let _ = Command::new("kill")
                     .arg("-TERM")
@@ -111,44 +115,13 @@ impl DisplayManager {
             thread::sleep(Duration::from_millis(100));
         }
 
-        let wayvnc_log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wayvnc_log)
-            .map_err(|err| format!("failed to open {}: {err}", self.wayvnc_log.display()))?;
-        let wayvnc_log_err = wayvnc_log
-            .try_clone()
-            .map_err(|err| format!("failed to clone wayvnc log handle: {err}"))?;
-
-        let mut wayvnc_cmd = Command::new("wayvnc");
-        wayvnc_cmd
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .arg("--socket")
-            .arg(&wayland_socket);
-        if let Some(password_file) = password_file {
-            wayvnc_cmd.arg("--password-file").arg(password_file);
-        }
-        wayvnc_cmd
-            .arg(listen_addr)
-            .stdout(Stdio::from(wayvnc_log))
-            .stderr(Stdio::from(wayvnc_log_err));
-
-        let wayvnc_child = wayvnc_cmd
-            .spawn()
-            .map_err(|err| format!("failed to launch wayvnc: {err}"))?;
-
         thread::sleep(Duration::from_millis(250));
-        if !self.is_alive(wayvnc_child.id()) {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(weston_child.id().to_string())
-                .status();
-            return Err("wayvnc exited immediately; check display logs".to_string());
+        if !self.is_alive(weston_child.id()) {
+            return Err("weston exited during startup; check display logs".to_string());
         }
 
         let session = DisplaySession {
             weston_pid: weston_child.id(),
-            wayvnc_pid: wayvnc_child.id(),
             runtime_dir,
             wayland_socket,
             listen_addr: listen_addr.to_string(),
@@ -162,7 +135,6 @@ impl DisplayManager {
             return Ok(());
         };
 
-        let _ = self.kill_pid(session.wayvnc_pid);
         let _ = self.kill_pid(session.weston_pid);
         let _ = fs::remove_file(&self.state_file);
         Ok(())
@@ -176,7 +148,7 @@ impl DisplayManager {
             });
         };
 
-        let running = self.is_alive(session.weston_pid) && self.is_alive(session.wayvnc_pid);
+        let running = self.is_alive(session.weston_pid);
         if !running {
             let _ = fs::remove_file(&self.state_file);
             return Ok(DisplayStatus {
@@ -205,7 +177,6 @@ impl DisplayManager {
             .map_err(|err| format!("failed to read {}: {err}", self.state_file.display()))?;
 
         let mut weston_pid = None;
-        let mut wayvnc_pid = None;
         let mut runtime_dir = None;
         let mut wayland_socket = None;
         let mut listen_addr = None;
@@ -216,7 +187,6 @@ impl DisplayManager {
             let value = parts.next().unwrap_or("").trim();
             match key {
                 "weston_pid" => weston_pid = value.parse::<u32>().ok(),
-                "wayvnc_pid" => wayvnc_pid = value.parse::<u32>().ok(),
                 "runtime_dir" => runtime_dir = Some(PathBuf::from(value)),
                 "wayland_socket" => wayland_socket = Some(value.to_string()),
                 "listen_addr" => listen_addr = Some(value.to_string()),
@@ -226,7 +196,6 @@ impl DisplayManager {
 
         let session = DisplaySession {
             weston_pid: weston_pid.ok_or_else(|| "state missing weston_pid".to_string())?,
-            wayvnc_pid: wayvnc_pid.ok_or_else(|| "state missing wayvnc_pid".to_string())?,
             runtime_dir: runtime_dir.ok_or_else(|| "state missing runtime_dir".to_string())?,
             wayland_socket: wayland_socket
                 .ok_or_else(|| "state missing wayland_socket".to_string())?,
@@ -238,9 +207,8 @@ impl DisplayManager {
 
     fn write_state(&self, session: &DisplaySession) -> Result<(), String> {
         let body = format!(
-            "weston_pid={}\nwayvnc_pid={}\nruntime_dir={}\nwayland_socket={}\nlisten_addr={}\n",
+            "weston_pid={}\nruntime_dir={}\nwayland_socket={}\nlisten_addr={}\n",
             session.weston_pid,
-            session.wayvnc_pid,
             session.runtime_dir.display(),
             session.wayland_socket,
             session.listen_addr,
@@ -265,11 +233,78 @@ impl DisplayManager {
     fn is_alive(&self, pid: u32) -> bool {
         PathBuf::from(format!("/proc/{pid}")).exists()
     }
+
+    fn ensure_rdp_tls_material(&self) -> Result<(), String> {
+        if self.rdp_tls_cert.exists() && self.rdp_tls_key.exists() {
+            return Ok(());
+        }
+
+        let status = Command::new("openssl")
+            .arg("req")
+            .arg("-x509")
+            .arg("-newkey")
+            .arg("rsa:2048")
+            .arg("-sha256")
+            .arg("-nodes")
+            .arg("-keyout")
+            .arg(self.rdp_tls_key.as_os_str())
+            .arg("-out")
+            .arg(self.rdp_tls_cert.as_os_str())
+            .arg("-days")
+            .arg("3650")
+            .arg("-subj")
+            .arg("/CN=omens-display")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|err| format!("failed to execute openssl for RDP TLS material: {err}"))?;
+        if !status.success() {
+            return Err(format!(
+                "openssl failed generating RDP TLS material with status {status}"
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.rdp_tls_key, fs::Permissions::from_mode(0o600)).map_err(
+                |err| {
+                    format!(
+                        "failed setting permissions on {}: {err}",
+                        self.rdp_tls_key.display()
+                    )
+                },
+            )?;
+            fs::set_permissions(&self.rdp_tls_cert, fs::Permissions::from_mode(0o644)).map_err(
+                |err| {
+                    format!(
+                        "failed setting permissions on {}: {err}",
+                        self.rdp_tls_cert.display()
+                    )
+                },
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+fn parse_listen_addr(value: &str) -> Result<(String, u16), String> {
+    let (host, port_raw) = value
+        .split_once(':')
+        .ok_or_else(|| "listen address must be in addr:port format".to_string())?;
+    if host.is_empty() {
+        return Err("listen address host must not be empty".to_string());
+    }
+    let port = port_raw
+        .parse::<u16>()
+        .map_err(|_| format!("invalid listen port `{port_raw}`"))?;
+    Ok((host.to_string(), port))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DisplayManager;
+    use super::{DisplayManager, parse_listen_addr};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -301,5 +336,17 @@ mod tests {
         fs::create_dir_all(&root).expect("root should exist");
         let manager = DisplayManager::new(&root);
         manager.stop().expect("stop should not fail");
+    }
+
+    #[test]
+    fn parse_listen_addr_accepts_valid_pair() {
+        let parsed = parse_listen_addr("127.0.0.1:3389").expect("listen address should parse");
+        assert_eq!(parsed, ("127.0.0.1".to_string(), 3389));
+    }
+
+    #[test]
+    fn parse_listen_addr_rejects_invalid_pair() {
+        let err = parse_listen_addr("127.0.0.1").expect_err("missing port should fail");
+        assert!(err.contains("addr:port"));
     }
 }

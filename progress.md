@@ -42,8 +42,9 @@ Last updated: 2026-02-25
 - Added auth session validation and login wait loop with redirect/marker/probe checks.
 - Added `omens auth bootstrap [--ephemeral]` flow with auth-required exit semantics (`20`) and ephemeral profile cleanup.
 - Added bundled/system browser binary resolution in runtime manager for auth launch wiring.
-- Added dedicated remote display session manager (`weston` + `wayvnc`) and CLI commands: `omens display start|stop|status`.
+- Added dedicated remote display session manager (`weston` RDP backend) and CLI commands: `omens display start|stop|status`.
 - Added `omens auth bootstrap --display` mode to launch browser inside the managed remote display session.
+- Added automatic local TLS certificate/key generation for Weston RDP startup so managed display sessions can run without manual key provisioning.
 
 ## Next Items
 - Add collect-path preflight auth validation and `EX_AUTH_REQUIRED` handling.

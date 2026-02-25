@@ -56,7 +56,7 @@ Sequence prioritizes early reliability risks first: runtime isolation, auth/sess
 4. Implement session validation contract: redirect check + marker check + optional protected probe.
 5. Pin `chromiumoxide` crate version to the validated `PINNED_CHROMIUM_BUILD` compatibility pair.
 6. Add auth-specific exit code behavior (`20` for auth required).
-7. Add remote display session management (`omens display start|stop|status`) using dedicated Weston + WayVNC instance with safe bind defaults.
+7. Add remote display session management (`omens display start|stop|status`) using dedicated Weston RDP backend instance with safe bind defaults.
 8. Acceptance: manual login bootstrap succeeds and validation passes (manual-interactive gate), including SSH-host workflows with optional remote display session.
 9. Tests: session validation logic with mocked browser/probe outcomes, ephemeral profile cleanup on success/failure, display session state management.
 

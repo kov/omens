@@ -4,7 +4,6 @@ use crate::config::{self, DoctorIssueSeverity, OmensConfig};
 use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
 use crate::runtime::display_manager::DisplayManager;
 use std::io;
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 pub const EX_FATAL: i32 = 40;
@@ -53,10 +52,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::BrowserUpgrade => browser_upgrade(),
         Command::BrowserRollback => browser_rollback(),
         Command::BrowserResetProfile => browser_reset_profile(),
-        Command::DisplayStart {
-            listen_addr,
-            password_file,
-        } => display_start(listen_addr, password_file),
+        Command::DisplayStart { listen_addr } => display_start(listen_addr),
         Command::DisplayStop => display_stop(),
         Command::DisplayStatus => display_status(),
         Command::ConfigDoctor => config_doctor(),
@@ -246,22 +242,18 @@ fn browser_reset_profile() -> Result<(), CliError> {
     Ok(())
 }
 
-fn display_start(listen_addr: String, password_file: Option<PathBuf>) -> Result<(), CliError> {
+fn display_start(listen_addr: String) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
     let manager = DisplayManager::new(&loaded.resolved.root_dir);
-    let password = password_file
-        .as_ref()
-        .map(|p| p.as_os_str().to_string_lossy());
     let session = manager
-        .start(listen_addr.as_str(), password.as_deref())
+        .start(listen_addr.as_str())
         .map_err(CliError::fatal)?;
     println!("display start");
     println!("  listen_addr: {}", session.listen_addr);
     println!("  runtime_dir: {}", session.runtime_dir.display());
     println!("  wayland_socket: {}", session.wayland_socket);
     println!("  weston_pid: {}", session.weston_pid);
-    println!("  wayvnc_pid: {}", session.wayvnc_pid);
     Ok(())
 }
 
@@ -284,7 +276,6 @@ fn display_status() -> Result<(), CliError> {
         println!("  runtime_dir: {}", session.runtime_dir.display());
         println!("  wayland_socket: {}", session.wayland_socket);
         println!("  weston_pid: {}", session.weston_pid);
-        println!("  wayvnc_pid: {}", session.wayvnc_pid);
     } else {
         println!("  running: no");
     }
@@ -370,7 +361,7 @@ fn print_usage(topic: HelpTopic) {
             println!("Usage:\n  omens browser status|install|upgrade|rollback|reset-profile")
         }
         HelpTopic::Display => println!(
-            "Usage:\n  omens display start [--listen addr:port] [--password-file path]\n  omens display stop\n  omens display status"
+            "Usage:\n  omens display start [--listen addr:port]\n  omens display stop\n  omens display status"
         ),
     }
 }
@@ -388,18 +379,11 @@ enum HelpTopic {
 }
 
 enum Command {
-    AuthBootstrap {
-        ephemeral: bool,
-        display: bool,
-    },
+    AuthBootstrap { ephemeral: bool, display: bool },
     ExploreStart,
     ExploreReview,
-    ExplorePromote {
-        recipe_id: String,
-    },
-    CollectRun {
-        sections: String,
-    },
+    ExplorePromote { recipe_id: String },
+    CollectRun { sections: String },
     ReportLatest,
     ConfigDoctor,
     BrowserStatus,
@@ -407,15 +391,10 @@ enum Command {
     BrowserUpgrade,
     BrowserRollback,
     BrowserResetProfile,
-    DisplayStart {
-        listen_addr: String,
-        password_file: Option<PathBuf>,
-    },
+    DisplayStart { listen_addr: String },
     DisplayStop,
     DisplayStatus,
-    Help {
-        topic: HelpTopic,
-    },
+    Help { topic: HelpTopic },
 }
 
 impl Command {
@@ -586,8 +565,7 @@ fn parse_display(args: &[String]) -> Result<Command, String> {
         return Ok(Command::DisplayStatus);
     }
     if args.len() >= 3 && args[2] == "start" {
-        let mut listen_addr = "127.0.0.1:5900".to_string();
-        let mut password_file = None::<PathBuf>;
+        let mut listen_addr = "127.0.0.1:3389".to_string();
         let mut i = 3usize;
         while i < args.len() {
             match args[i].as_str() {
@@ -598,25 +576,12 @@ fn parse_display(args: &[String]) -> Result<Command, String> {
                     listen_addr = value.clone();
                     i += 2;
                 }
-                "--password-file" => {
-                    let value = args
-                        .get(i + 1)
-                        .ok_or_else(|| "missing value after --password-file".to_string())?;
-                    password_file = Some(PathBuf::from(value));
-                    i += 2;
-                }
                 _ => {
-                    return Err(
-                        "usage: omens display start [--listen addr:port] [--password-file path]"
-                            .to_string(),
-                    );
+                    return Err("usage: omens display start [--listen addr:port]".to_string());
                 }
             }
         }
-        return Ok(Command::DisplayStart {
-            listen_addr,
-            password_file,
-        });
+        return Ok(Command::DisplayStart { listen_addr });
     }
 
     Err("usage: omens display start|stop|status".to_string())
@@ -700,21 +665,12 @@ mod tests {
             "display",
             "start",
             "--listen",
-            "0.0.0.0:5900",
-            "--password-file",
-            "/tmp/vnc.pass",
+            "0.0.0.0:3389",
         ]))
         .expect("display start should parse");
         match command {
-            Command::DisplayStart {
-                listen_addr,
-                password_file,
-            } => {
-                assert_eq!(listen_addr, "0.0.0.0:5900");
-                assert_eq!(
-                    password_file.map(|p| p.display().to_string()),
-                    Some("/tmp/vnc.pass".to_string())
-                );
+            Command::DisplayStart { listen_addr } => {
+                assert_eq!(listen_addr, "0.0.0.0:3389");
             }
             _ => panic!("unexpected command variant"),
         }
