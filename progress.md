@@ -37,6 +37,7 @@ Last updated: 2026-02-25
 - Added checksum-source lookup from sidecar `.sha256` URL when available and enforced verification on matchable installs.
 - Added interrupted-install cleanup guarantees for partial build directories and temporary metadata files.
 - Added Chrome-for-Testing manifest resolution by pinned revision to map runtime `build` values to real artifact URLs.
+- Added Debian Trixie ARM64 Chromium package fallback when a pinned revision is missing from Chrome-for-Testing manifests.
 - Added browser harness abstraction and chromiumoxide-backed CDP harness implementation for auth/session flows.
 - Added auth session validation and login wait loop with redirect/marker/probe checks.
 - Added `omens auth bootstrap [--ephemeral]` flow with auth-required exit semantics (`20`) and ephemeral profile cleanup.
