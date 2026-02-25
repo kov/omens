@@ -62,6 +62,7 @@ struct ArtifactSource {
 pub struct BrowserManager {
     root_dir: PathBuf,
     browser_profile_dir: PathBuf,
+    system_binary_path: Option<PathBuf>,
     mode: BrowserMode,
     configured_build: u64,
     platform: ChromiumPlatform,
@@ -75,10 +76,45 @@ impl BrowserManager {
         Ok(Self {
             root_dir: config.resolved.root_dir.clone(),
             browser_profile_dir: config.resolved.browser_user_data_dir.clone(),
+            system_binary_path: config.browser.system_binary_path.clone().map(PathBuf::from),
             mode,
             configured_build: config.browser.bundled_build,
             platform,
         })
+    }
+
+    pub fn browser_binary_path(&self) -> Result<PathBuf, String> {
+        match self.mode {
+            BrowserMode::System => self
+                .system_binary_path
+                .clone()
+                .ok_or_else(|| "browser.system_binary_path is required in system mode".to_string()),
+            BrowserMode::Bundled => {
+                let current = self.chromium_dir().join("current");
+                let candidates = [
+                    current.join("chrome"),
+                    current.join("chrome-linux64/chrome"),
+                    current.join("chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium"),
+                    current.join("chrome-mac-x64/Chromium.app/Contents/MacOS/Chromium"),
+                    current.join("Chromium.app/Contents/MacOS/Chromium"),
+                ];
+
+                for candidate in candidates {
+                    if candidate.exists() {
+                        return Ok(candidate);
+                    }
+                }
+
+                Err(format!(
+                    "unable to resolve bundled browser binary under {}. run `omens browser install`",
+                    current.display()
+                ))
+            }
+        }
+    }
+
+    pub fn default_profile_dir(&self) -> &Path {
+        &self.browser_profile_dir
     }
 
     pub fn status(&self) -> BrowserInstallState {

@@ -19,6 +19,8 @@ pub struct OmensConfig {
 pub struct ClubeFiiConfig {
     pub base_url: String,
     pub login_url: String,
+    pub auth_marker: Option<String>,
+    pub protected_probe_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +118,8 @@ impl Default for OmensConfig {
             clubefii: ClubeFiiConfig {
                 base_url: "https://www.clubefii.com.br".to_string(),
                 login_url: "https://www.clubefii.com.br/login".to_string(),
+                auth_marker: None,
+                protected_probe_url: None,
             },
             runtime: RuntimeConfig { root_dir: None },
             browser: BrowserConfig {
@@ -220,6 +224,13 @@ fn parse_config_file(path: &Path) -> Result<OmensConfig, String> {
     }
     if let Some(value) = entries.get("clubefii.login_url") {
         config.clubefii.login_url = expect_string("clubefii.login_url", value)?;
+    }
+    if let Some(value) = entries.get("clubefii.auth_marker") {
+        config.clubefii.auth_marker = Some(expect_string("clubefii.auth_marker", value)?);
+    }
+    if let Some(value) = entries.get("clubefii.protected_probe_url") {
+        config.clubefii.protected_probe_url =
+            Some(expect_string("clubefii.protected_probe_url", value)?);
     }
 
     if let Some(value) = entries.get("runtime.root_dir") {
@@ -728,7 +739,8 @@ mod tests {
         let path = unique_temp_file("parse");
         fs::write(
             &path,
-            "[runtime]\nroot_dir = \"~/custom\"\n\
+            "[clubefii]\nauth_marker = \"dashboard\"\nprotected_probe_url = \"https://probe.local\"\n\
+             [runtime]\nroot_dir = \"~/custom\"\n\
              [browser]\nheadless_collect = false\nbundled_build = 123\n\
              [collector]\nsections = [\"news\",\"material-facts\"]\nmax_pages_per_section = 9\n\
              [analysis.thresholds]\nhigh_impact = 0.9\n",
@@ -737,6 +749,11 @@ mod tests {
 
         let config = parse_config_file(&path).expect("config should parse");
         assert_eq!(config.runtime.root_dir.as_deref(), Some("~/custom"));
+        assert_eq!(config.clubefii.auth_marker.as_deref(), Some("dashboard"));
+        assert_eq!(
+            config.clubefii.protected_probe_url.as_deref(),
+            Some("https://probe.local")
+        );
         assert!(!config.browser.headless_collect);
         assert_eq!(config.browser.bundled_build, 123);
         assert_eq!(

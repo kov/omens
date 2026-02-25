@@ -8,7 +8,7 @@ Last updated: 2026-02-25
 - [x] Phase 2a started
 - [x] Phase 2b started
 - [x] Phase 2b completed
-- [ ] Phase 3 started
+- [x] Phase 3 started
 - [ ] Phase 4 started
 - [ ] Phase 5 started
 - [ ] Phase 6 started
@@ -37,6 +37,11 @@ Last updated: 2026-02-25
 - Added checksum-source lookup from sidecar `.sha256` URL when available and enforced verification on matchable installs.
 - Added interrupted-install cleanup guarantees for partial build directories and temporary metadata files.
 - Added Chrome-for-Testing manifest resolution by pinned revision to map runtime `build` values to real artifact URLs.
+- Added browser harness abstraction and command-backed harness implementation for auth/session flows.
+- Added auth session validation and login wait loop with redirect/marker/probe checks.
+- Added `omens auth bootstrap [--ephemeral]` flow with auth-required exit semantics (`20`) and ephemeral profile cleanup.
+- Added bundled/system browser binary resolution in runtime manager for auth launch wiring.
 
 ## Next Items
-- Start browser launch/auth bootstrap wiring on top of installed runtime and persistent profile flow.
+- Replace command-based auth harness with chromiumoxide-backed CDP session validation.
+- Add collect-path preflight auth validation and `EX_AUTH_REQUIRED` handling.

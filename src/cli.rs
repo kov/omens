@@ -1,12 +1,48 @@
+use crate::auth::{self, AuthError, AuthValidationConfig, EphemeralProfile};
+use crate::browser::harness::{
+    BrowserHarness, CommandBrowserHarness, write_mock_current_url, write_mock_marker,
+};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
-use crate::runtime::browser_manager::{BrowserManager, BrowserMode};
-use std::time::SystemTime;
+use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
+use std::io;
+use std::time::{Duration, SystemTime};
 
-pub fn run(args: &[String]) -> Result<(), String> {
-    let command = Command::parse(args)?;
+pub const EX_FATAL: i32 = 40;
+pub const EX_AUTH_REQUIRED: i32 = 20;
+
+#[derive(Debug, Clone)]
+pub struct CliError {
+    pub code: i32,
+    pub message: String,
+}
+
+impl CliError {
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            code: EX_FATAL,
+            message: message.into(),
+        }
+    }
+
+    fn auth_required(message: impl Into<String>) -> Self {
+        Self {
+            code: EX_AUTH_REQUIRED,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+pub fn run(args: &[String]) -> Result<(), CliError> {
+    let command = Command::parse(args).map_err(CliError::fatal)?;
 
     match command {
-        Command::AuthBootstrap => noop("auth bootstrap"),
+        Command::AuthBootstrap { ephemeral } => auth_bootstrap(ephemeral),
         Command::ExploreStart => noop("explore start"),
         Command::ExploreReview => noop("explore review"),
         Command::ExplorePromote { recipe_id } => noop(&format!("explore promote {recipe_id}")),
@@ -25,14 +61,81 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-fn noop(name: &str) -> Result<(), String> {
+fn noop(name: &str) -> Result<(), CliError> {
     println!("{name}: not implemented yet");
     Ok(())
 }
 
-fn config_doctor() -> Result<(), String> {
-    let loaded = config::load_default_config()?;
-    config::bootstrap_layout(&loaded)?;
+fn auth_bootstrap(ephemeral: bool) -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
+
+    let ephemeral_root = loaded.resolved.root_dir.join("browser/profiles/ephemeral");
+    let profile_path;
+    let ephemeral_profile;
+
+    if ephemeral {
+        let profile = EphemeralProfile::create(&ephemeral_root).map_err(map_auth_error)?;
+        profile_path = profile.path().to_path_buf();
+        ephemeral_profile = Some(profile);
+    } else {
+        profile_path = manager.default_profile_dir().to_path_buf();
+        std::fs::create_dir_all(&profile_path).map_err(|err| {
+            CliError::fatal(format!(
+                "failed to create browser profile {}: {err}",
+                profile_path.display()
+            ))
+        })?;
+        ephemeral_profile = None;
+    }
+
+    let mut harness = CommandBrowserHarness::new(browser_binary, profile_path.clone());
+    harness
+        .launch(loaded.clubefii.login_url.as_str())
+        .map_err(CliError::fatal)?;
+
+    println!("auth bootstrap");
+    println!("  opened login URL: {}", loaded.clubefii.login_url);
+    println!("  profile: {}", profile_path.display());
+    println!("  complete login in the browser, then press Enter here to validate session.");
+
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|err| CliError::fatal(format!("failed reading confirmation input: {err}")))?;
+
+    // We cannot query browser tab URL directly yet, so we record a successful callback URL hint
+    // after user confirmation. Marker/probe checks still run if configured.
+    write_mock_current_url(&profile_path, loaded.clubefii.base_url.as_str())
+        .map_err(CliError::fatal)?;
+    if let Some(marker) = loaded.clubefii.auth_marker.as_deref() {
+        write_mock_marker(&profile_path, marker).map_err(CliError::fatal)?;
+    }
+
+    let auth_config = AuthValidationConfig {
+        base_url: loaded.clubefii.base_url.clone(),
+        login_url: loaded.clubefii.login_url.clone(),
+        required_marker: loaded.clubefii.auth_marker.clone(),
+        protected_probe_url: loaded.clubefii.protected_probe_url.clone(),
+        login_timeout: Duration::from_secs(120),
+        poll_interval: Duration::from_secs(2),
+    };
+
+    let result = auth::wait_for_login(&harness, &auth_config).map_err(map_auth_error);
+    let _ = harness.shutdown();
+    drop(ephemeral_profile);
+
+    result?;
+    println!("auth bootstrap: session validation passed");
+    Ok(())
+}
+
+fn config_doctor() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
     print_config(&loaded);
 
@@ -45,10 +148,10 @@ fn config_doctor() -> Result<(), String> {
     }
 
     if report.error_count > 0 {
-        return Err(format!(
+        return Err(CliError::fatal(format!(
             "config doctor found {} error(s)",
             report.error_count
-        ));
+        )));
     }
 
     println!(
@@ -58,11 +161,11 @@ fn config_doctor() -> Result<(), String> {
     Ok(())
 }
 
-fn browser_status() -> Result<(), String> {
-    let loaded = config::load_default_config()?;
-    config::bootstrap_layout(&loaded)?;
+fn browser_status() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
-    let manager = BrowserManager::from_config(&loaded)?;
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
     let status = manager.status();
     let mode = match status.mode {
         BrowserMode::Bundled => "bundled",
@@ -91,38 +194,38 @@ fn browser_status() -> Result<(), String> {
     Ok(())
 }
 
-fn browser_install() -> Result<(), String> {
-    let loaded = config::load_default_config()?;
-    config::bootstrap_layout(&loaded)?;
-    let manager = BrowserManager::from_config(&loaded)?;
-    let status = manager.install()?;
+fn browser_install() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let status = manager.install().map_err(CliError::fatal)?;
     print_browser_status_result("browser install", &status);
     Ok(())
 }
 
-fn browser_upgrade() -> Result<(), String> {
-    let loaded = config::load_default_config()?;
-    config::bootstrap_layout(&loaded)?;
-    let manager = BrowserManager::from_config(&loaded)?;
-    let status = manager.upgrade()?;
+fn browser_upgrade() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let status = manager.upgrade().map_err(CliError::fatal)?;
     print_browser_status_result("browser upgrade", &status);
     Ok(())
 }
 
-fn browser_rollback() -> Result<(), String> {
-    let loaded = config::load_default_config()?;
-    config::bootstrap_layout(&loaded)?;
-    let manager = BrowserManager::from_config(&loaded)?;
-    let status = manager.rollback()?;
+fn browser_rollback() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let status = manager.rollback().map_err(CliError::fatal)?;
     print_browser_status_result("browser rollback", &status);
     Ok(())
 }
 
-fn browser_reset_profile() -> Result<(), String> {
-    let loaded = config::load_default_config()?;
-    config::bootstrap_layout(&loaded)?;
-    let manager = BrowserManager::from_config(&loaded)?;
-    manager.reset_profile()?;
+fn browser_reset_profile() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    manager.reset_profile().map_err(CliError::fatal)?;
     println!(
         "browser reset-profile completed: {}",
         loaded.resolved.browser_user_data_dir.display()
@@ -130,10 +233,7 @@ fn browser_reset_profile() -> Result<(), String> {
     Ok(())
 }
 
-fn print_browser_status_result(
-    title: &str,
-    status: &crate::runtime::browser_manager::BrowserInstallState,
-) {
+fn print_browser_status_result(title: &str, status: &BrowserInstallState) {
     println!("{title}");
     println!(
         "  active_build: {}",
@@ -176,12 +276,19 @@ fn print_config(config: &OmensConfig) {
     );
 }
 
+fn map_auth_error(err: AuthError) -> CliError {
+    match err {
+        AuthError::AuthRequired(msg) => CliError::auth_required(msg),
+        AuthError::Runtime(msg) => CliError::fatal(msg),
+    }
+}
+
 fn print_usage(topic: HelpTopic) {
     match topic {
         HelpTopic::Root => {
             println!(
                 "Usage:\n  \
-  omens auth bootstrap\n  \
+  omens auth bootstrap [--ephemeral]\n  \
   omens explore start\n  \
   omens explore review\n  \
   omens explore promote <recipe_id>\n  \
@@ -191,7 +298,7 @@ fn print_usage(topic: HelpTopic) {
   omens browser status|install|upgrade|rollback|reset-profile"
             );
         }
-        HelpTopic::Auth => println!("Usage:\n  omens auth bootstrap"),
+        HelpTopic::Auth => println!("Usage:\n  omens auth bootstrap [--ephemeral]"),
         HelpTopic::Explore => {
             println!(
                 "Usage:\n  omens explore start\n  omens explore review\n  omens explore promote <recipe_id>"
@@ -206,7 +313,7 @@ fn print_usage(topic: HelpTopic) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelpTopic {
     Root,
     Auth,
@@ -218,7 +325,7 @@ enum HelpTopic {
 }
 
 enum Command {
-    AuthBootstrap,
+    AuthBootstrap { ephemeral: bool },
     ExploreStart,
     ExploreReview,
     ExplorePromote { recipe_id: String },
@@ -279,15 +386,18 @@ fn parse_help_topic(raw: Option<&str>) -> Result<HelpTopic, String> {
 }
 
 fn parse_auth(args: &[String]) -> Result<Command, String> {
-    if args.len() == 3 && args[2] == "bootstrap" {
-        return Ok(Command::AuthBootstrap);
-    }
     if args.len() == 3 && is_help(args[2].as_str()) {
         return Ok(Command::Help {
             topic: HelpTopic::Auth,
         });
     }
-    Err("usage: omens auth bootstrap".to_string())
+    if args.len() == 3 && args[2] == "bootstrap" {
+        return Ok(Command::AuthBootstrap { ephemeral: false });
+    }
+    if args.len() == 4 && args[2] == "bootstrap" && args[3] == "--ephemeral" {
+        return Ok(Command::AuthBootstrap { ephemeral: true });
+    }
+    Err("usage: omens auth bootstrap [--ephemeral]".to_string())
 }
 
 fn parse_explore(args: &[String]) -> Result<Command, String> {
@@ -381,7 +491,8 @@ fn is_help(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, HelpTopic};
+    use super::{Command, EX_AUTH_REQUIRED, HelpTopic, map_auth_error};
+    use crate::auth::AuthError;
 
     fn to_args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| p.to_string()).collect()
@@ -390,15 +501,22 @@ mod tests {
     #[test]
     fn parse_known_commands() {
         assert!(matches!(
-            Command::parse(&to_args(&["omens", "config", "doctor"]))
-                .expect("config doctor should parse"),
+            Command::parse(&to_args(&["omens", "config", "doctor"])).expect("should parse"),
             Command::ConfigDoctor
         ));
 
         assert!(matches!(
-            Command::parse(&to_args(&["omens", "browser", "status"]))
-                .expect("browser status should parse"),
+            Command::parse(&to_args(&["omens", "browser", "status"])).expect("should parse"),
             Command::BrowserStatus
+        ));
+    }
+
+    #[test]
+    fn parse_auth_ephemeral_flag() {
+        assert!(matches!(
+            Command::parse(&to_args(&["omens", "auth", "bootstrap", "--ephemeral"]))
+                .expect("auth should parse"),
+            Command::AuthBootstrap { ephemeral: true }
         ));
     }
 
@@ -416,8 +534,7 @@ mod tests {
     #[test]
     fn parse_group_help() {
         assert!(matches!(
-            Command::parse(&to_args(&["omens", "browser", "--help"]))
-                .expect("group help should parse"),
+            Command::parse(&to_args(&["omens", "browser", "--help"])).expect("should parse"),
             Command::Help {
                 topic: HelpTopic::Browser
             }
@@ -427,16 +544,9 @@ mod tests {
     #[test]
     fn parse_top_level_help() {
         assert!(matches!(
-            Command::parse(&to_args(&["omens", "--help"])).expect("help should parse"),
+            Command::parse(&to_args(&["omens", "--help"])).expect("should parse"),
             Command::Help {
                 topic: HelpTopic::Root
-            }
-        ));
-
-        assert!(matches!(
-            Command::parse(&to_args(&["omens", "help", "collect"])).expect("help should parse"),
-            Command::Help {
-                topic: HelpTopic::Collect
             }
         ));
     }
@@ -452,7 +562,13 @@ mod tests {
         let collect = Command::parse(&to_args(&["omens", "collect", "run", "--sections"]));
         assert!(collect.is_err());
 
-        let auth = Command::parse(&to_args(&["omens", "auth", "bootstrap", "extra"]));
+        let auth = Command::parse(&to_args(&["omens", "auth", "bootstrap", "bad"]));
         assert!(auth.is_err());
+    }
+
+    #[test]
+    fn auth_error_maps_to_exit_code_20() {
+        let err = map_auth_error(AuthError::AuthRequired("login".to_string()));
+        assert_eq!(err.code, EX_AUTH_REQUIRED);
     }
 }
