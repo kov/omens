@@ -119,16 +119,24 @@ impl BrowserHarness for ChromiumoxideHarness {
     }
 
     fn probe_authenticated(&self, probe_url: &str) -> Result<bool, String> {
-        let response = reqwest::blocking::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(20))
-            .build()
-            .map_err(|err| format!("failed to construct probe client: {err}"))?
-            .get(probe_url)
-            .send()
-            .map_err(|err| format!("probe request failed: {err}"))?;
-
-        Ok(response.status().is_success())
+        let page = self.page()?.clone();
+        let url = probe_url.to_string();
+        self.runtime.block_on(async move {
+            page.goto(&url)
+                .await
+                .map_err(|err| format!("probe navigation to {url} failed: {err}"))?;
+            let nav = page
+                .wait_for_navigation_response()
+                .await
+                .map_err(|err| format!("probe wait for response failed: {err}"))?;
+            match nav {
+                Some(req) => match &req.response {
+                    Some(resp) => Ok(resp.status == 200),
+                    None => Ok(false),
+                },
+                None => Ok(false),
+            }
+        })
     }
 
     fn shutdown(&mut self) -> Result<(), String> {

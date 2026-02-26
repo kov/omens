@@ -147,9 +147,17 @@ impl BrowserManager {
         }
     }
 
-    pub fn install(&self) -> Result<BrowserInstallState, String> {
+    pub fn install(&self, force: bool) -> Result<BrowserInstallState, String> {
         self.ensure_bundled_mode()?;
         let build = self.target_build();
+
+        if !force {
+            let status = self.status();
+            if status.is_installed && status.active_build == Some(build) {
+                return Ok(status);
+            }
+        }
+
         let source = self.resolve_artifact_source(build)?;
         self.finalize_install(build, &source)
     }
@@ -254,15 +262,15 @@ impl BrowserManager {
         self.download_archive(source.url.as_str(), &archive_path)?;
 
         let actual_checksum = compute_sha256(&archive_path)?;
-        if let Some(expected) = source.expected_sha256.as_deref() {
-            if !expected.eq_ignore_ascii_case(actual_checksum.as_str()) {
-                return Err(format!(
-                    "checksum mismatch for {} (expected {}, got {})",
-                    archive_path.display(),
-                    expected,
-                    actual_checksum
-                ));
-            }
+        if let Some(expected) = source.expected_sha256.as_deref()
+            && !expected.eq_ignore_ascii_case(actual_checksum.as_str())
+        {
+            return Err(format!(
+                "checksum mismatch for {} (expected {}, got {})",
+                archive_path.display(),
+                expected,
+                actual_checksum
+            ));
         }
 
         self.extract_archive(&archive_path, build_dir)
@@ -666,10 +674,10 @@ fn read_link_target(path: &Path) -> Result<PathBuf, String> {
 
 fn compute_sha256(path: &Path) -> Result<String, String> {
     let sha256sum = Command::new("sha256sum").arg(path).output();
-    if let Ok(output) = sha256sum {
-        if output.status.success() {
-            return parse_checksum_output("sha256sum", &output.stdout);
-        }
+    if let Ok(output) = sha256sum
+        && output.status.success()
+    {
+        return parse_checksum_output("sha256sum", &output.stdout);
     }
 
     let shasum = Command::new("shasum")
@@ -981,7 +989,7 @@ mod tests {
 
         let manager = BrowserManager::from_config(&config).expect("manager should build");
         assert_eq!(manager.status().mode, BrowserMode::System);
-        assert!(manager.install().is_err());
+        assert!(manager.install(false).is_err());
         assert!(manager.upgrade().is_err());
         assert!(manager.rollback().is_err());
     }

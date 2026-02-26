@@ -41,10 +41,10 @@ impl DisplayManager {
     pub fn start(&self, listen_addr: &str) -> Result<DisplaySession, String> {
         self.ensure_display_dir()?;
 
-        if let Some(existing) = self.read_state()? {
-            if self.is_alive(existing.weston_pid) {
-                return Err("display session already running".to_string());
-            }
+        if let Some(existing) = self.read_state()?
+            && self.is_alive(existing.weston_pid)
+        {
+            return Err("display session already running".to_string());
         }
 
         let runtime_dir = self.display_dir.join("runtime");

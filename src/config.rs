@@ -646,11 +646,15 @@ fn expect_string_array(key: &str, value: &TomlValue) -> Result<Vec<String>, Stri
 }
 
 fn strip_comment(raw_line: &str) -> &str {
-    if let Some(pos) = raw_line.find('#') {
-        &raw_line[..pos]
-    } else {
-        raw_line
+    let mut in_string = false;
+    for (i, ch) in raw_line.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            '#' if !in_string => return &raw_line[..i],
+            _ => {}
+        }
     }
+    raw_line
 }
 
 fn resolve_paths(config_file: PathBuf, config: &OmensConfig) -> Result<ResolvedPaths, String> {
@@ -905,5 +909,20 @@ mod tests {
                 .any(|issue| issue.severity == DoctorIssueSeverity::Warning
                     && issue.message.contains("days old"))
         );
+    }
+
+    #[test]
+    fn hash_inside_quoted_string_is_preserved() {
+        let path = unique_temp_file("hash-in-string");
+        fs::write(
+            &path,
+            "[clubefii]\nbase_url = \"https://example.com/path#frag\"\n",
+        )
+        .expect("should write config");
+
+        let config = parse_config_file(&path).expect("config should parse");
+        assert_eq!(config.clubefii.base_url, "https://example.com/path#frag");
+
+        let _ = fs::remove_file(path);
     }
 }

@@ -15,13 +15,19 @@ const MIGRATIONS: &[&str] = &[
     )",
     "CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,
         section TEXT NOT NULL,
-        canonical_key TEXT NOT NULL UNIQUE,
-        title TEXT,
         url TEXT,
+        external_id TEXT,
+        stable_key TEXT NOT NULL UNIQUE,
+        title TEXT,
         published_at INTEGER,
-        first_seen_run_id INTEGER,
-        last_seen_run_id INTEGER
+        issuer TEXT,
+        raw_hash TEXT,
+        content_hash TEXT,
+        normalized_json TEXT,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS item_versions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,8 +43,9 @@ const MIGRATIONS: &[&str] = &[
         item_id INTEGER NOT NULL,
         run_id INTEGER NOT NULL,
         kind TEXT NOT NULL,
-        severity INTEGER NOT NULL,
+        severity TEXT NOT NULL,
         confidence REAL NOT NULL,
+        reasons_json TEXT,
         summary TEXT NOT NULL,
         created_at INTEGER NOT NULL
     )",
@@ -47,14 +54,16 @@ const MIGRATIONS: &[&str] = &[
         section TEXT NOT NULL,
         name TEXT NOT NULL,
         status TEXT NOT NULL,
+        confidence REAL,
         selector_json TEXT NOT NULL,
+        diagnostics_json TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS item_key_aliases (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         alias_key TEXT NOT NULL UNIQUE,
-        canonical_key TEXT NOT NULL,
+        stable_key TEXT NOT NULL,
         item_id INTEGER,
         created_at INTEGER NOT NULL
     )",
@@ -236,15 +245,13 @@ impl Store {
                 .query_map(params![item_id], |row| row.get::<_, i64>(0))
                 .map_err(|err| format!("failed listing versions for item {item_id}: {err}"))?;
 
-            let mut idx = 0u32;
-            for v_row in v_rows {
+            for (idx, v_row) in v_rows.enumerate() {
                 let version_id = v_row.map_err(|err| {
                     format!("failed reading version row for item {item_id}: {err}")
                 })?;
-                if idx >= keep_versions_per_item {
+                if idx >= keep_versions_per_item as usize {
                     version_ids_to_delete.push(version_id);
                 }
-                idx += 1;
             }
         }
 
