@@ -8,4 +8,6 @@ chromiumoxide = "0.9.0"
 futures-util = "0.3.32"
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "rustls"] }
 rusqlite = { version = "0.38.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "time"] }

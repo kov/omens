@@ -46,11 +46,9 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::AuthBootstrap { ephemeral, display } => {
             commands::auth_bootstrap(ephemeral, display)
         }
-        Command::ExploreStart => commands::noop("explore start"),
-        Command::ExploreReview => commands::noop("explore review"),
-        Command::ExplorePromote { recipe_id } => {
-            commands::noop(&format!("explore promote {recipe_id}"))
-        }
+        Command::ExploreStart => commands::explore_start(),
+        Command::ExploreReview => commands::explore_review(),
+        Command::ExplorePromote { recipe_id } => commands::explore_promote(recipe_id),
         Command::CollectRun { sections } => commands::collect_run(sections),
         Command::ReportLatest => commands::noop("report latest"),
         Command::BrowserStatus => commands::browser_status(),
@@ -95,7 +93,7 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Report => println!("Usage:\n  omens report latest"),
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
         HelpTopic::Browser => {
-            println!("Usage:\n  omens browser status|install|upgrade|rollback|reset-profile")
+            println!("Usage:\n  omens browser status|install [--force]|upgrade|rollback|reset-profile")
         }
         HelpTopic::Display => println!(
             "Usage:\n  omens display start [--listen addr:port]\n  omens display stop\n  omens display status"

@@ -112,6 +112,48 @@ pub struct RetentionPlan {
     pub version_ids_to_delete: Vec<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipeStatus {
+    PendingReview,
+    Active,
+    Degraded,
+    Retired,
+}
+
+impl RecipeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PendingReview => "pending_review",
+            Self::Active => "active",
+            Self::Degraded => "degraded",
+            Self::Retired => "retired",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending_review" => Some(Self::PendingReview),
+            "active" => Some(Self::Active),
+            "degraded" => Some(Self::Degraded),
+            "retired" => Some(Self::Retired),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecipeRow {
+    pub id: i64,
+    pub section: String,
+    pub name: String,
+    pub status: RecipeStatus,
+    pub confidence: Option<f64>,
+    pub selector_json: String,
+    pub diagnostics_json: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 impl Store {
     pub fn open(db_path: &Path) -> Result<Self, String> {
         if let Some(parent) = db_path.parent() {
@@ -260,6 +302,159 @@ impl Store {
             version_ids_to_delete,
         })
     }
+
+    pub fn insert_recipe(
+        &self,
+        section: &str,
+        name: &str,
+        confidence: Option<f64>,
+        selector_json: &str,
+        diagnostics_json: Option<&str>,
+        now_epoch: i64,
+    ) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO recipes(section, name, status, confidence, selector_json, diagnostics_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![
+                    section,
+                    name,
+                    RecipeStatus::PendingReview.as_str(),
+                    confidence,
+                    selector_json,
+                    diagnostics_json,
+                    now_epoch,
+                ],
+            )
+            .map_err(|err| format!("failed to insert recipe: {err}"))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_recipes(&self, section: Option<&str>) -> Result<Vec<RecipeRow>, String> {
+        let mut rows = Vec::new();
+        if let Some(section) = section {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT id, section, name, status, confidence, selector_json, diagnostics_json, created_at, updated_at
+                     FROM recipes WHERE section = ?1 ORDER BY updated_at DESC",
+                )
+                .map_err(|err| format!("failed preparing recipe list query: {err}"))?;
+            let mapped = stmt
+                .query_map(params![section], map_recipe_row)
+                .map_err(|err| format!("failed listing recipes: {err}"))?;
+            for row in mapped {
+                rows.push(row.map_err(|err| format!("failed reading recipe row: {err}"))?);
+            }
+        } else {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT id, section, name, status, confidence, selector_json, diagnostics_json, created_at, updated_at
+                     FROM recipes ORDER BY section, updated_at DESC",
+                )
+                .map_err(|err| format!("failed preparing recipe list query: {err}"))?;
+            let mapped = stmt
+                .query_map([], map_recipe_row)
+                .map_err(|err| format!("failed listing recipes: {err}"))?;
+            for row in mapped {
+                rows.push(row.map_err(|err| format!("failed reading recipe row: {err}"))?);
+            }
+        }
+        Ok(rows)
+    }
+
+    pub fn get_active_recipe(&self, section: &str) -> Result<Option<RecipeRow>, String> {
+        self.conn
+            .query_row(
+                "SELECT id, section, name, status, confidence, selector_json, diagnostics_json, created_at, updated_at
+                 FROM recipes WHERE section = ?1 AND status = ?2",
+                params![section, RecipeStatus::Active.as_str()],
+                map_recipe_row,
+            )
+            .optional()
+            .map_err(|err| format!("failed querying active recipe for {section}: {err}"))
+    }
+
+    pub fn promote_recipe(&self, recipe_id: i64, now_epoch: i64) -> Result<RecipeRow, String> {
+        let recipe: RecipeRow = self
+            .conn
+            .query_row(
+                "SELECT id, section, name, status, confidence, selector_json, diagnostics_json, created_at, updated_at
+                 FROM recipes WHERE id = ?1",
+                params![recipe_id],
+                map_recipe_row,
+            )
+            .optional()
+            .map_err(|err| format!("failed loading recipe {recipe_id}: {err}"))?
+            .ok_or_else(|| format!("recipe {recipe_id} not found"))?;
+
+        // Demote current active recipe for this section
+        self.conn
+            .execute(
+                "UPDATE recipes SET status = ?1, updated_at = ?2 WHERE section = ?3 AND status = ?4",
+                params![
+                    RecipeStatus::Retired.as_str(),
+                    now_epoch,
+                    recipe.section,
+                    RecipeStatus::Active.as_str(),
+                ],
+            )
+            .map_err(|err| format!("failed demoting active recipe: {err}"))?;
+
+        self.conn
+            .execute(
+                "UPDATE recipes SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![RecipeStatus::Active.as_str(), now_epoch, recipe_id],
+            )
+            .map_err(|err| format!("failed promoting recipe {recipe_id}: {err}"))?;
+
+        self.conn
+            .query_row(
+                "SELECT id, section, name, status, confidence, selector_json, diagnostics_json, created_at, updated_at
+                 FROM recipes WHERE id = ?1",
+                params![recipe_id],
+                map_recipe_row,
+            )
+            .optional()
+            .map_err(|err| format!("failed reloading promoted recipe: {err}"))?
+            .ok_or_else(|| format!("recipe {recipe_id} not found after promote"))
+    }
+
+    pub fn update_recipe_status(
+        &self,
+        recipe_id: i64,
+        status: RecipeStatus,
+        now_epoch: i64,
+    ) -> Result<(), String> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE recipes SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now_epoch, recipe_id],
+            )
+            .map_err(|err| format!("failed updating recipe {recipe_id} status: {err}"))?;
+        if changed == 0 {
+            return Err(format!("recipe {recipe_id} not found"));
+        }
+        Ok(())
+    }
+}
+
+fn map_recipe_row(row: &rusqlite::Row) -> rusqlite::Result<RecipeRow> {
+    let status_str: String = row.get(3)?;
+    let status = RecipeStatus::parse(&status_str).unwrap_or(RecipeStatus::PendingReview);
+    Ok(RecipeRow {
+        id: row.get(0)?,
+        section: row.get(1)?,
+        name: row.get(2)?,
+        status,
+        confidence: row.get(4)?,
+        selector_json: row.get(5)?,
+        diagnostics_json: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
 }
 
 pub fn acquire_collect_lock(lock_path: &Path) -> Result<LockGuard, LockError> {
@@ -352,7 +547,7 @@ pub fn now_epoch_seconds() -> Result<i64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LockError, RunStatus, Store, acquire_collect_lock};
+    use super::{LockError, RecipeStatus, RunStatus, Store, acquire_collect_lock};
     use rusqlite::params;
     use std::fs;
     use std::path::PathBuf;
@@ -451,5 +646,96 @@ mod tests {
             .expect("retention plan should compute");
         assert!(plan.run_ids_to_delete.is_empty());
         assert_eq!(plan.version_ids_to_delete.len(), 1);
+    }
+
+    #[test]
+    fn recipe_insert_and_list() {
+        let root = unique_temp_dir("recipe-insert");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let id = store
+            .insert_recipe(
+                "news",
+                "news-v1",
+                Some(0.85),
+                r#"{"listing":".item"}"#,
+                None,
+                100,
+            )
+            .expect("insert should work");
+        assert!(id > 0);
+
+        let all = store.list_recipes(None).expect("list should work");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].section, "news");
+        assert_eq!(all[0].name, "news-v1");
+        assert_eq!(all[0].status, RecipeStatus::PendingReview);
+        assert_eq!(all[0].confidence, Some(0.85));
+
+        let by_section = store
+            .list_recipes(Some("news"))
+            .expect("section list should work");
+        assert_eq!(by_section.len(), 1);
+
+        let empty = store
+            .list_recipes(Some("material-facts"))
+            .expect("empty section should work");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn promote_recipe_demotes_previous_active() {
+        let root = unique_temp_dir("recipe-promote");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let r1 = store
+            .insert_recipe("news", "v1", None, "{}", None, 100)
+            .expect("insert r1");
+        let r2 = store
+            .insert_recipe("news", "v2", None, "{}", None, 200)
+            .expect("insert r2");
+
+        let promoted = store.promote_recipe(r1, 300).expect("promote r1");
+        assert_eq!(promoted.status, RecipeStatus::Active);
+
+        let active = store
+            .get_active_recipe("news")
+            .expect("query active")
+            .expect("should have active");
+        assert_eq!(active.id, r1);
+
+        // Promoting r2 should demote r1
+        let promoted2 = store.promote_recipe(r2, 400).expect("promote r2");
+        assert_eq!(promoted2.status, RecipeStatus::Active);
+
+        let recipes = store.list_recipes(Some("news")).expect("list");
+        let r1_row = recipes
+            .iter()
+            .find(|r| r.id == r1)
+            .expect("r1 should exist");
+        assert_eq!(r1_row.status, RecipeStatus::Retired);
+    }
+
+    #[test]
+    fn update_recipe_status_to_degraded() {
+        let root = unique_temp_dir("recipe-degrade");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let id = store
+            .insert_recipe("news", "v1", None, "{}", None, 100)
+            .expect("insert");
+        store.promote_recipe(id, 200).expect("promote");
+        store
+            .update_recipe_status(id, RecipeStatus::Degraded, 300)
+            .expect("degrade");
+
+        let recipes = store.list_recipes(Some("news")).expect("list");
+        assert_eq!(recipes[0].status, RecipeStatus::Degraded);
     }
 }

@@ -182,6 +182,20 @@ mod tests {
             Ok(self.probe_ok)
         }
 
+        fn page_source(&self) -> Result<String, String> {
+            Ok("<html>mock</html>".to_string())
+        }
+
+        fn capture_page_fingerprint(
+            &self,
+        ) -> Result<crate::browser::harness::PageFingerprint, String> {
+            Ok(crate::browser::harness::PageFingerprint {
+                url: self.current_url()?,
+                title: "Mock Page".to_string(),
+                candidate_selectors: Vec::new(),
+            })
+        }
+
         fn shutdown(&mut self) -> Result<(), String> {
             Ok(())
         }

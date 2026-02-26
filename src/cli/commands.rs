@@ -1,6 +1,7 @@
 use crate::auth::{self, AuthError, AuthValidationConfig, EphemeralProfile};
-use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness};
+use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness, SelectorKind};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
+use crate::explore::fixtures::{FailureBundleDiagnostics, FailureBundleWriter, FixtureWriter};
 use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
 use crate::runtime::display_manager::DisplayManager;
 use crate::store::{self, LockError, RunStatus, Store};
@@ -86,6 +87,244 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
     result?;
     println!("auth bootstrap: session validation passed");
     Ok(())
+}
+
+pub fn explore_start() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
+    let profile_path = manager.default_profile_dir().to_path_buf();
+    std::fs::create_dir_all(&profile_path).map_err(|err| {
+        CliError::fatal(format!(
+            "failed to create browser profile {}: {err}",
+            profile_path.display()
+        ))
+    })?;
+
+    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, Vec::new())
+        .map_err(CliError::fatal)?;
+
+    let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
+    store.migrate().map_err(CliError::fatal)?;
+
+    let fixture_writer = FixtureWriter::new(&loaded.resolved.root_dir.join("fixtures"));
+    let bundle_writer = FailureBundleWriter::new(&loaded.resolved.root_dir.join("failure_bundles"));
+
+    let start_url = loaded.clubefii.base_url.clone();
+    harness
+        .launch(start_url.as_str())
+        .map_err(CliError::fatal)?;
+
+    println!("explore start");
+    println!("  navigate the site to the sections you want to capture.");
+    println!("  when on a listing page, press Enter to capture a recipe candidate.");
+    println!("  type 'done' and press Enter to finish.\n");
+
+    let sections = &loaded.collector.sections;
+    let mut captured_count = 0u32;
+
+    loop {
+        print!("[explore] section name (or 'done'): ");
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|err| CliError::fatal(format!("failed reading input: {err}")))?;
+        let input = input.trim();
+
+        if input == "done" || input.is_empty() {
+            break;
+        }
+
+        let section = input.to_string();
+        if !sections.iter().any(|s| s == &section) {
+            println!(
+                "  unknown section '{section}'; expected one of: {}",
+                sections.join(", ")
+            );
+            continue;
+        }
+
+        println!("  capturing page fingerprint...");
+        let fingerprint = match harness.capture_page_fingerprint() {
+            Ok(fp) => fp,
+            Err(err) => {
+                println!("  capture failed: {err}");
+                let _ = bundle_writer.save_bundle(
+                    &FailureBundleDiagnostics {
+                        section: section.clone(),
+                        url: "unknown".to_string(),
+                        error: err.clone(),
+                        recipe_id: None,
+                    },
+                    None,
+                );
+                continue;
+            }
+        };
+
+        let page_html = harness.page_source().ok();
+        if let Some(html) = &page_html {
+            match fixture_writer.save_page(&section, &fingerprint.url, html) {
+                Ok(path) => println!("  fixture saved: {}", path.display()),
+                Err(err) => println!("  fixture save failed: {err}"),
+            }
+        }
+
+        let selector_json = build_selector_json(&fingerprint.candidate_selectors);
+        let confidence = compute_fingerprint_confidence(&fingerprint.candidate_selectors);
+        let name = format!("{section}-explore-{captured_count}");
+        let now = store::now_epoch_seconds().map_err(CliError::fatal)?;
+
+        let recipe_id = store
+            .insert_recipe(&section, &name, Some(confidence), &selector_json, None, now)
+            .map_err(CliError::fatal)?;
+
+        println!("  recipe captured: id={recipe_id} name={name} confidence={confidence:.2}");
+        println!("  url: {}", fingerprint.url);
+        println!("  title: {}", fingerprint.title);
+        println!(
+            "  selectors: {} candidates found",
+            fingerprint.candidate_selectors.len()
+        );
+
+        captured_count += 1;
+    }
+
+    let _ = harness.shutdown();
+    println!("\nexplore start: captured {captured_count} recipe candidate(s)");
+    if captured_count > 0 {
+        println!("  run `omens explore review` to see candidates");
+        println!("  run `omens explore promote <id>` to activate one");
+    }
+    Ok(())
+}
+
+pub fn explore_review() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
+    store.migrate().map_err(CliError::fatal)?;
+
+    let recipes = store.list_recipes(None).map_err(CliError::fatal)?;
+    if recipes.is_empty() {
+        println!("explore review: no recipes found");
+        println!("  run `omens explore start` to capture candidates");
+        return Ok(());
+    }
+
+    println!("explore review: {} recipe(s)\n", recipes.len());
+    for recipe in &recipes {
+        let confidence_str = recipe
+            .confidence
+            .map(|c| format!("{c:.2}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  id={:<4} section={:<20} status={:<15} confidence={:<6} name={}",
+            recipe.id,
+            recipe.section,
+            recipe.status.as_str(),
+            confidence_str,
+            recipe.name,
+        );
+    }
+    Ok(())
+}
+
+pub fn explore_promote(recipe_id: String) -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
+    store.migrate().map_err(CliError::fatal)?;
+
+    let id: i64 = recipe_id
+        .parse()
+        .map_err(|_| CliError::fatal(format!("invalid recipe id: {recipe_id}")))?;
+
+    let now = store::now_epoch_seconds().map_err(CliError::fatal)?;
+    let promoted = store.promote_recipe(id, now).map_err(CliError::fatal)?;
+
+    println!("explore promote: recipe {} is now active", promoted.id);
+    println!("  section: {}", promoted.section);
+    println!("  name: {}", promoted.name);
+
+    let active = store
+        .get_active_recipe(&promoted.section)
+        .map_err(CliError::fatal)?;
+    if let Some(active) = active
+        && active.id == promoted.id
+    {
+        println!(
+            "  verified: active recipe for '{}' is id={}",
+            promoted.section, active.id
+        );
+    }
+    Ok(())
+}
+
+fn build_selector_json(candidates: &[crate::browser::harness::CandidateSelector]) -> String {
+    use crate::browser::harness::SelectorKind;
+
+    let listing: Vec<&str> = candidates
+        .iter()
+        .filter(|c| c.kind == SelectorKind::ListingItem)
+        .map(|c| c.selector.as_str())
+        .collect();
+    let pagination: Vec<&str> = candidates
+        .iter()
+        .filter(|c| c.kind == SelectorKind::PaginationLink)
+        .map(|c| c.selector.as_str())
+        .collect();
+    let detail: Vec<&str> = candidates
+        .iter()
+        .filter(|c| c.kind == SelectorKind::DetailLink)
+        .map(|c| c.selector.as_str())
+        .collect();
+
+    // Simple JSON construction without serde dependency in this module
+    format!(
+        "{{\"listing\":{},\"pagination\":{},\"detail\":{}}}",
+        json_string_array(&listing),
+        json_string_array(&pagination),
+        json_string_array(&detail),
+    )
+}
+
+fn json_string_array(items: &[&str]) -> String {
+    let entries: Vec<String> = items
+        .iter()
+        .map(|s| format!("\"{}\"", s.replace('\"', "\\\"")))
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+fn compute_fingerprint_confidence(
+    candidates: &[crate::browser::harness::CandidateSelector],
+) -> f64 {
+    let has_listing = candidates
+        .iter()
+        .any(|c| c.kind == SelectorKind::ListingItem);
+    let has_pagination = candidates
+        .iter()
+        .any(|c| c.kind == SelectorKind::PaginationLink);
+    let has_detail = candidates
+        .iter()
+        .any(|c| c.kind == SelectorKind::DetailLink);
+
+    let mut score = 0.0;
+    if has_listing {
+        score += 0.5;
+    }
+    if has_pagination {
+        score += 0.25;
+    }
+    if has_detail {
+        score += 0.25;
+    }
+    score
 }
 
 pub fn collect_run(sections: String) -> Result<(), CliError> {

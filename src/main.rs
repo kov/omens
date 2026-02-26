@@ -2,6 +2,7 @@ mod auth;
 mod browser;
 mod cli;
 mod config;
+mod explore;
 mod runtime;
 mod store;
 
