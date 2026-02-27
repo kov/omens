@@ -31,59 +31,6 @@ impl FixtureWriter {
     }
 }
 
-pub struct FailureBundleWriter {
-    bundles_dir: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub struct FailureBundleDiagnostics {
-    pub section: String,
-    pub url: String,
-    pub error: String,
-    pub recipe_id: Option<i64>,
-}
-
-impl FailureBundleWriter {
-    pub fn new(bundles_dir: &Path) -> Self {
-        Self {
-            bundles_dir: bundles_dir.to_path_buf(),
-        }
-    }
-
-    pub fn save_bundle(
-        &self,
-        diagnostics: &FailureBundleDiagnostics,
-        page_source: Option<&str>,
-    ) -> Result<PathBuf, String> {
-        let stamp = epoch_millis()?;
-        let bundle_dir = self
-            .bundles_dir
-            .join(format!("{}-{stamp}", diagnostics.section));
-        fs::create_dir_all(&bundle_dir)
-            .map_err(|err| format!("failed to create {}: {err}", bundle_dir.display()))?;
-
-        let diag_json = format!(
-            "{{\"section\":\"{}\",\"url\":\"{}\",\"error\":\"{}\",\"recipe_id\":{}}}",
-            diagnostics.section,
-            diagnostics.url,
-            diagnostics.error.replace('\"', "\\\""),
-            diagnostics
-                .recipe_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "null".to_string()),
-        );
-        fs::write(bundle_dir.join("diagnostics.json"), &diag_json)
-            .map_err(|err| format!("failed to write diagnostics: {err}"))?;
-
-        if let Some(source) = page_source {
-            fs::write(bundle_dir.join("page.html"), source)
-                .map_err(|err| format!("failed to write page source: {err}"))?;
-        }
-
-        Ok(bundle_dir)
-    }
-}
-
 fn epoch_millis() -> Result<u128, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -93,7 +40,7 @@ fn epoch_millis() -> Result<u128, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FailureBundleDiagnostics, FailureBundleWriter, FixtureWriter};
+    use super::FixtureWriter;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -126,50 +73,5 @@ mod tests {
 
         // Verify it's under the section subdirectory
         assert!(path.parent().unwrap().ends_with("news"));
-    }
-
-    #[test]
-    fn failure_bundle_creates_diagnostics_and_page() {
-        let root = unique_temp_dir("bundle-write");
-        let writer = FailureBundleWriter::new(&root);
-        let diag = FailureBundleDiagnostics {
-            section: "news".to_string(),
-            url: "https://example.com/fail".to_string(),
-            error: "selector not found".to_string(),
-            recipe_id: Some(42),
-        };
-
-        let bundle_path = writer
-            .save_bundle(&diag, Some("<html>broken</html>"))
-            .expect("should write bundle");
-
-        assert!(bundle_path.is_dir());
-        let diag_path = bundle_path.join("diagnostics.json");
-        assert!(diag_path.exists());
-        let diag_content = fs::read_to_string(&diag_path).expect("should read diagnostics");
-        assert!(diag_content.contains("\"section\":\"news\""));
-        assert!(diag_content.contains("\"recipe_id\":42"));
-
-        let page_path = bundle_path.join("page.html");
-        assert!(page_path.exists());
-    }
-
-    #[test]
-    fn failure_bundle_without_page_source() {
-        let root = unique_temp_dir("bundle-no-page");
-        let writer = FailureBundleWriter::new(&root);
-        let diag = FailureBundleDiagnostics {
-            section: "material-facts".to_string(),
-            url: "https://example.com".to_string(),
-            error: "timeout".to_string(),
-            recipe_id: None,
-        };
-
-        let bundle_path = writer
-            .save_bundle(&diag, None)
-            .expect("should write bundle");
-
-        assert!(bundle_path.join("diagnostics.json").exists());
-        assert!(!bundle_path.join("page.html").exists());
     }
 }

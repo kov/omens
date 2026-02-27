@@ -1,6 +1,6 @@
 # Omens Implementation Progress
 
-Last updated: 2026-02-25
+Last updated: 2026-02-27
 
 ## Phase Status
 - [x] Phase 1 started
@@ -10,8 +10,10 @@ Last updated: 2026-02-25
 - [x] Phase 2b completed
 - [x] Phase 3 started
 - [x] Phase 4 started
-- [ ] Phase 5 started
-- [ ] Phase 6 started
+- [x] Phase 5 started
+- [x] Phase 5 completed
+- [x] Phase 6 started
+- [x] Phase 6 completed
 - [ ] Phase 7 started
 - [ ] Phase 8 started
 
@@ -50,7 +52,41 @@ Last updated: 2026-02-25
 - Wired `collect run` to initialize storage, persist run start/end lifecycle records, and report persisted run metadata.
 - Added retention planning helper that computes candidate run/version deletions from `keep_runs_days` and `keep_versions_per_item` settings.
 - Added tests for migration idempotency, lock contention behavior, run lifecycle transitions, and retention version-keep logic.
+- Reworked explore mode from manual page-by-page capture to fully automated fund page tab crawling.
+- `explore start <url-or-ticker>` navigates to a fund page (ticker auto-expanded to `clubefii.com.br/fiis/{TICKER}`), discovers all hash-anchor tabs via JS, and crawls each one automatically.
+- Added CDP network-idle detection to `click_and_wait`: tracks in-flight requests via `EventRequestWillBeSent`/`EventLoadingFinished`/`EventLoadingFailed` event streams; waits until 0 in-flight for 500ms or 10s timeout.
+- Added `TabSummary` structural capture: HTML table scan (selector hint, row/col counts, headers), repeating div-group detection (finds containers with ≥3 children sharing a class — catches court cases, contracts, photos, comments, news cards), and link pattern extraction with `{id}`/`{ticker}` placeholders.
+- Saves HTML fixture per tab to `~/.omens/fixtures/<section>/` and a recipe with `selector_json` encoding the full structural summary.
+- Confidence scoring: 1.0 when data tables (≥3 rows) or repeating groups found; 0.75 otherwise.
+- Changed default browser mode from `bundled` to `system` with auto-detection of well-known binary paths.
+- Added Wayland browser args (`--ozone-platform=wayland`, `--force-device-scale-factor=1`) and disabled chromiumoxide's default 800×600 viewport emulation (`viewport(None)`) for headed RDP sessions.
+- Crawled BRCR11 (25 tabs) and RBRX11 (24 tabs) during development; all tabs successfully captured with full structural summaries.
+
+- Implemented Phase 6 collection pipeline: `collect run --tickers BRCR11 [--sections proventos,comunicados]`
+- `collect run` navigates to each ticker's fund page, discovers active recipes, clicks each tab, and extracts data using recipe-guided selectors.
+- Tabular extraction: `extract_table_rows(selector_hint)` — finds table by CSS selector, returns all `tbody tr` rows as `Vec<Vec<String>>`.
+- Repeating-group extraction: `extract_repeating_group_rows(container, child_sel, field_ids)` — finds container, iterates children, extracts text by `id` attribute match.
+- `Store::upsert_item` — insert or update items with stable dedup key; returns `(item_id, is_new)`.
+- `Store::insert_item_version_on_change` — `INSERT OR IGNORE` by `(item_id, content_hash)` UNIQUE constraint; returns true if new.
+- `Store::apply_retention` — executes the retention plan computed by `build_retention_plan`.
+- `content_hash_fnv` — deterministic FNV-1a 64-bit hash for content fingerprinting, no external dep.
+- `collector.tickers` added to config (string array); `--tickers csv` CLI flag overrides it.
+- `collector.sections` validation relaxed to accept any section name (not just "news"/"material-facts").
+- `BrowserHarness` trait cleaned up: removed obsolete `capture_page_fingerprint` (and `PageFingerprint`, `CandidateSelector`, `SelectorKind`); removed `url`/`title` from `TabSummary`.
+- Selector drift detected at extraction time: recipe is marked `Degraded` and collection continues for other sections.
+- 57 tests passing.
+
+- Improved collection pipeline robustness (post-Phase 6 session work on RBOP11):
+- `capture_tab_summary` table selector now walks ancestor DOM for nearest element with an `id` when the table itself has none; produces stable `#container table` / `#container .class` selectors instead of fragile `table:nth-of-type(N)`. This fixed `cotacoes` (was 0 rows, now 64 rows from `#tabela_rentabilidade table`).
+- `do_collect` table selection: prefers first table with headers AND ≥3 rows over first table with ≥3 rows only; skips single-row noise elements like `#tab_colaboradores`; ensures dividend history tables (e.g. `#tabela_proventos .thin` with column labels) are selected over unlabelled summary blocks.
+- Added `BrowserHarness::dismiss_overlays()` — hides `#modal_masterpage` and `#mask` (site-wide ad popup) via JS after page load, before tab navigation. Called in both `do_collect` and `explore_start`.
+- Blank header fields (e.g. the "report error" form column in `#tabela_proventos .thin`) now filtered out when building the field map; blank overflow cells also skipped.
+- Verified live extraction against RBOP11: `comunicados` (300 rows, `#tabela_documentos_tb`), `cotacoes` (64 rows), `informacoes_basicas` (9–10 rows), `proventos` (13 rows with full dividend history: MÊS REF., DATA BASE, VALOR, VARIAÇÃO, DATA PAGAMENTO, COTAÇÃO DAT. BASE, YIELD DAT. BASE, TIPO).
+- RBOP11 dividend analysis: 10+ consecutive months of NÃO DISTRIBUIÇÃO (Feb–Dec 2025), resumed Jan 2026 (R$ 0,500), increased Feb 2026 (R$ 0,550, +10%).
 
 ## Next Items
-- Apply retention plans during real collection execution once extractor/storage wiring lands.
-- Implement extraction/normalization pipeline and persist `items` / `item_versions` / `signals` during `collect run`.
+- Phase 7: Deterministic rules for scoring material facts, court case severity, dividend changes; LM Studio summarization.
+- Phase 8: Terminal prioritized alert output; JSON/Markdown report artifacts.
+- Filter site-wide noise from repeating groups during extraction (`.byFundo > DIV.modal`, `.menu-principal-scroll > LI.has-sub`, `#campos_data_hora` appear on every tab) — can be done as a pre-filter in `extract_repeating_group_rows` or as a post-processing step.
+- `omens explore review` — enhance to show recipe selector preview alongside confidence.
+- **Primary key stability**: first cell is not unique for categorical columns (e.g. comunicados "Categoria"). Use row-index suffix or composite key to avoid in-run stable-key collisions.

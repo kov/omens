@@ -40,6 +40,7 @@ pub struct BrowserConfig {
 #[derive(Debug, Clone)]
 pub struct CollectorConfig {
     pub sections: Vec<String>,
+    pub tickers: Vec<String>,
     pub max_pages_per_section: u32,
     pub pagination_mode: String,
     pub detail_open_policy: String,
@@ -123,7 +124,7 @@ impl Default for OmensConfig {
             },
             runtime: RuntimeConfig { root_dir: None },
             browser: BrowserConfig {
-                mode: "bundled".to_string(),
+                mode: "system".to_string(),
                 system_binary_path: None,
                 bundled_build: 0,
                 user_data_dir: None,
@@ -131,6 +132,7 @@ impl Default for OmensConfig {
             },
             collector: CollectorConfig {
                 sections: vec!["news".to_string(), "material-facts".to_string()],
+                tickers: Vec::new(),
                 max_pages_per_section: 20,
                 pagination_mode: "next_link".to_string(),
                 detail_open_policy: "when_listing_incomplete".to_string(),
@@ -257,6 +259,9 @@ fn parse_config_file(path: &Path) -> Result<OmensConfig, String> {
     if let Some(value) = entries.get("collector.sections") {
         config.collector.sections = expect_string_array("collector.sections", value)?;
     }
+    if let Some(value) = entries.get("collector.tickers") {
+        config.collector.tickers = expect_string_array("collector.tickers", value)?;
+    }
     if let Some(value) = entries.get("collector.max_pages_per_section") {
         config.collector.max_pages_per_section =
             expect_u32("collector.max_pages_per_section", value)?;
@@ -326,14 +331,6 @@ fn validate_semantics(config: &OmensConfig) -> Result<(), String> {
 
     if config.collector.sections.is_empty() {
         return Err("collector.sections must not be empty".to_string());
-    }
-
-    for section in &config.collector.sections {
-        if section != "news" && section != "material-facts" {
-            return Err(format!(
-                "collector.sections contains unsupported section `{section}`"
-            ));
-        }
     }
 
     if config.collector.max_pages_per_section == 0 {
@@ -410,30 +407,40 @@ fn check_parent_path(report: &mut DoctorReport, name: &str, parent: Option<&Path
 }
 
 fn check_system_browser(report: &mut DoctorReport, config: &OmensConfig) {
-    let path = config
+    let explicit_path = config
         .browser
         .system_binary_path
         .as_deref()
         .unwrap_or("")
-        .trim();
-    if path.is_empty() {
-        push_issue(
-            report,
-            DoctorIssueSeverity::Error,
-            "browser.mode=system requires browser.system_binary_path".to_string(),
-        );
+        .trim()
+        .to_string();
+
+    if !explicit_path.is_empty() {
+        let binary = Path::new(&explicit_path);
+        if !binary.exists() {
+            push_issue(
+                report,
+                DoctorIssueSeverity::Error,
+                format!(
+                    "browser.system_binary_path does not exist: {}",
+                    binary.display()
+                ),
+            );
+        }
         return;
     }
 
-    let binary = Path::new(path);
-    if !binary.exists() {
+    let well_known = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ];
+    if !well_known.iter().any(|p| Path::new(p).exists()) {
         push_issue(
             report,
             DoctorIssueSeverity::Error,
-            format!(
-                "browser.system_binary_path does not exist: {}",
-                binary.display()
-            ),
+            "no system browser found; set browser.system_binary_path in config".to_string(),
         );
     }
 }
@@ -818,13 +825,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_section_name_errors() {
-        let path = unique_temp_file("invalid-section");
-        fs::write(&path, "[collector]\nsections = [\"news\", \"foo\"]\n")
-            .expect("should write invalid sections");
+    fn custom_section_name_is_valid() {
+        let path = unique_temp_file("custom-section");
+        fs::write(
+            &path,
+            "[collector]\nsections = [\"news\", \"proventos\", \"comunicados\"]\n",
+        )
+        .expect("should write config");
 
-        let err = parse_config_file(&path).expect_err("parsing should fail");
-        assert!(err.contains("collector.sections contains unsupported section `foo`"));
+        let config = parse_config_file(&path).expect("custom section names should be valid");
+        assert_eq!(config.collector.sections.len(), 3);
 
         let _ = fs::remove_file(path);
     }
@@ -848,6 +858,7 @@ mod tests {
         fs::create_dir_all(root.join("lock")).expect("lock dir should be created");
 
         let mut config = OmensConfig::default();
+        config.browser.mode = "bundled".to_string();
         config.resolved.config_file = root.join("config/omens.toml");
         config.resolved.root_dir = root.clone();
         config.resolved.storage_db_path = root.join("db/omens.db");
@@ -867,7 +878,7 @@ mod tests {
 
         let mut config = OmensConfig::default();
         config.browser.mode = "system".to_string();
-        config.browser.system_binary_path = None;
+        config.browser.system_binary_path = Some("/nonexistent/browser".to_string());
         config.resolved.config_file = root.join("config/omens.toml");
         config.resolved.root_dir = root.clone();
         config.resolved.storage_db_path = root.join("db/omens.db");
@@ -880,7 +891,7 @@ mod tests {
                 .issues
                 .iter()
                 .any(|issue| issue.severity == DoctorIssueSeverity::Error
-                    && issue.message.contains("browser.mode=system requires"))
+                    && issue.message.contains("does not exist"))
         );
     }
 
@@ -894,6 +905,7 @@ mod tests {
         fs::write(chromium_dir.join("chromium.lock"), "test").expect("lock file should be written");
 
         let mut config = OmensConfig::default();
+        config.browser.mode = "bundled".to_string();
         config.resolved.config_file = root.join("config/omens.toml");
         config.resolved.root_dir = root.clone();
         config.resolved.storage_db_path = root.join("db/omens.db");

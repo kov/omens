@@ -142,6 +142,7 @@ impl RecipeStatus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RecipeRow {
     pub id: i64,
     pub section: String,
@@ -235,6 +236,7 @@ impl Store {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn run_row(&self, run_id: i64) -> Result<Option<(String, Option<i64>)>, String> {
         self.conn
             .query_row(
@@ -421,6 +423,94 @@ impl Store {
             .ok_or_else(|| format!("recipe {recipe_id} not found after promote"))
     }
 
+    /// Insert or update an item. Returns (item_id, is_new).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_item(
+        &self,
+        source: &str,
+        section: &str,
+        url: Option<&str>,
+        external_id: Option<&str>,
+        stable_key: &str,
+        title: Option<&str>,
+        raw_hash: Option<&str>,
+        content_hash: &str,
+        normalized_json: &str,
+        now_epoch: i64,
+    ) -> Result<(i64, bool), String> {
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM items WHERE stable_key = ?1",
+                params![stable_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| format!("failed querying item {stable_key}: {err}"))?;
+
+        if let Some(id) = existing {
+            self.conn
+                .execute(
+                    "UPDATE items SET last_seen_at = ?1, content_hash = ?2, normalized_json = ?3, raw_hash = ?4 WHERE id = ?5",
+                    params![now_epoch, content_hash, normalized_json, raw_hash, id],
+                )
+                .map_err(|err| format!("failed updating item {id}: {err}"))?;
+            Ok((id, false))
+        } else {
+            self.conn
+                .execute(
+                    "INSERT INTO items(source, section, url, external_id, stable_key, title, raw_hash, content_hash, normalized_json, first_seen_at, last_seen_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                    params![
+                        source, section, url, external_id, stable_key,
+                        title, raw_hash, content_hash, normalized_json, now_epoch
+                    ],
+                )
+                .map_err(|err| format!("failed inserting item {stable_key}: {err}"))?;
+            Ok((self.conn.last_insert_rowid(), true))
+        }
+    }
+
+    /// Insert an item_version if this content_hash is new for this item. Returns true if inserted.
+    pub fn insert_item_version_on_change(
+        &self,
+        item_id: i64,
+        run_id: i64,
+        content_hash: &str,
+        payload_json: &str,
+        now_epoch: i64,
+    ) -> Result<bool, String> {
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO item_versions(item_id, run_id, content_hash, payload_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![item_id, run_id, content_hash, payload_json, now_epoch],
+            )
+            .map_err(|err| {
+                format!("failed inserting item version for item {item_id}: {err}")
+            })?;
+        Ok(changed > 0)
+    }
+
+    /// Execute a retention plan, deleting old runs and excess item_versions.
+    pub fn apply_retention(&self, plan: &RetentionPlan) -> Result<(), String> {
+        for &run_id in &plan.run_ids_to_delete {
+            self.conn
+                .execute("DELETE FROM runs WHERE id = ?1", params![run_id])
+                .map_err(|err| format!("failed deleting run {run_id}: {err}"))?;
+        }
+        for &version_id in &plan.version_ids_to_delete {
+            self.conn
+                .execute(
+                    "DELETE FROM item_versions WHERE id = ?1",
+                    params![version_id],
+                )
+                .map_err(|err| format!("failed deleting item_version {version_id}: {err}"))?;
+        }
+        Ok(())
+    }
+
     pub fn update_recipe_status(
         &self,
         recipe_id: i64,
@@ -535,6 +625,16 @@ fn stale_or_contended_message(lock_path: &Path) -> String {
         "collect lock is already held at {}; another run may be active",
         lock_path.display()
     )
+}
+
+/// FNV-1a 64-bit hash — deterministic across runs, no external dependency.
+pub fn content_hash_fnv(data: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in data.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 pub fn now_epoch_seconds() -> Result<i64, String> {
@@ -718,6 +818,123 @@ mod tests {
             .find(|r| r.id == r1)
             .expect("r1 should exist");
         assert_eq!(r1_row.status, RecipeStatus::Retired);
+    }
+
+    #[test]
+    fn upsert_item_creates_then_updates() {
+        let root = unique_temp_dir("upsert-item");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let (id1, is_new1) = store
+            .upsert_item(
+                "clubefii",
+                "proventos",
+                Some("https://example.com#proventos"),
+                Some("BRCR11/proventos/2024-01"),
+                "external_id:BRCR11/proventos/2024-01",
+                Some("2024-01"),
+                None,
+                "deadbeef00000001",
+                r#"[["mes","2024-01"],["valor","R$1.00"]]"#,
+                1000,
+            )
+            .expect("upsert should succeed");
+        assert!(id1 > 0);
+        assert!(is_new1);
+
+        // Same stable_key → update
+        let (id2, is_new2) = store
+            .upsert_item(
+                "clubefii",
+                "proventos",
+                Some("https://example.com#proventos"),
+                Some("BRCR11/proventos/2024-01"),
+                "external_id:BRCR11/proventos/2024-01",
+                Some("2024-01"),
+                None,
+                "deadbeef00000002",
+                r#"[["mes","2024-01"],["valor","R$1.05"]]"#,
+                2000,
+            )
+            .expect("second upsert should succeed");
+        assert_eq!(id1, id2);
+        assert!(!is_new2);
+    }
+
+    #[test]
+    fn item_version_on_change_inserts_once_per_hash() {
+        let root = unique_temp_dir("version-change");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let run_id = store.start_run("proventos", 100).expect("run");
+        let (item_id, _) = store
+            .upsert_item(
+                "clubefii",
+                "proventos",
+                None,
+                None,
+                "external_id:T/s/k",
+                None,
+                None,
+                "hash1",
+                "{}",
+                100,
+            )
+            .expect("upsert");
+
+        let inserted1 = store
+            .insert_item_version_on_change(item_id, run_id, "hash1", "{}", 100)
+            .expect("version insert 1");
+        assert!(inserted1);
+
+        // Same hash → no duplicate (OR IGNORE)
+        let inserted2 = store
+            .insert_item_version_on_change(item_id, run_id, "hash1", "{}", 200)
+            .expect("version insert 2 same hash");
+        assert!(!inserted2);
+
+        // Different hash → new version
+        let inserted3 = store
+            .insert_item_version_on_change(item_id, run_id, "hash2", "{\"v\":2}", 300)
+            .expect("version insert 3 new hash");
+        assert!(inserted3);
+    }
+
+    #[test]
+    fn apply_retention_deletes_planned_entries() {
+        let root = unique_temp_dir("apply-retention");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let run_id = store.start_run("test", 10).expect("run");
+        store
+            .finish_run(run_id, super::RunStatus::Success, 20, None)
+            .expect("finish");
+
+        let plan = store
+            .build_retention_plan(20 + 180 * 24 * 3600 + 1, 180, 20)
+            .expect("plan");
+        assert_eq!(plan.run_ids_to_delete.len(), 1);
+
+        store.apply_retention(&plan).expect("apply");
+
+        let remaining = store.run_row(run_id).expect("query");
+        assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn content_hash_fnv_is_deterministic() {
+        let h1 = super::content_hash_fnv("hello world");
+        let h2 = super::content_hash_fnv("hello world");
+        let h3 = super::content_hash_fnv("hello world!");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, h3);
+        assert_eq!(h1.len(), 16);
     }
 
     #[test]

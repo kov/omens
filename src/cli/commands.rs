@@ -1,14 +1,51 @@
 use crate::auth::{self, AuthError, AuthValidationConfig, EphemeralProfile};
-use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness, SelectorKind};
+use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness, TabSummary};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
-use crate::explore::fixtures::{FailureBundleDiagnostics, FailureBundleWriter, FixtureWriter};
+use crate::explore::fixtures::FixtureWriter;
 use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
 use crate::runtime::display_manager::DisplayManager;
-use crate::store::{self, LockError, RunStatus, Store};
+use crate::store::{self, LockError, RecipeStatus, RunStatus, Store};
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, SystemTime};
 
 use super::CliError;
+
+// ── Recipe selector JSON deserialization ────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct RecipeSelectorJson {
+    #[serde(default)]
+    tables: Vec<RecipeTableInfo>,
+    #[serde(default)]
+    repeating_groups: Vec<RecipeGroupInfo>,
+}
+
+#[derive(Deserialize, Default)]
+struct RecipeTableInfo {
+    hint: String,
+    #[serde(default)]
+    rows: usize,
+    #[serde(default)]
+    headers: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RecipeGroupInfo {
+    container: String,
+    child: String,
+    #[serde(default)]
+    fields: Vec<String>,
+}
+
+struct CollectStats {
+    items_seen: usize,
+    items_new: usize,
+    items_changed: usize,
+}
+
+// ── Command implementations ──────────────────────────────────────────────────
 
 pub fn noop(name: &str) -> Result<(), CliError> {
     println!("{name}: not implemented yet");
@@ -89,7 +126,7 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn explore_start() -> Result<(), CliError> {
+pub fn explore_start(url: String) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
@@ -103,101 +140,150 @@ pub fn explore_start() -> Result<(), CliError> {
         ))
     })?;
 
-    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, Vec::new())
+    let mut launch_env = Vec::<(String, String)>::new();
+    let display_mgr = DisplayManager::new(&loaded.resolved.root_dir);
+    if let Ok(status) = display_mgr.status()
+        && let Some(session) = status.session
+    {
+        launch_env.push((
+            "XDG_RUNTIME_DIR".to_string(),
+            session.runtime_dir.display().to_string(),
+        ));
+        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+    }
+
+    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
         .map_err(CliError::fatal)?;
 
     let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
     store.migrate().map_err(CliError::fatal)?;
 
     let fixture_writer = FixtureWriter::new(&loaded.resolved.root_dir.join("fixtures"));
-    let bundle_writer = FailureBundleWriter::new(&loaded.resolved.root_dir.join("failure_bundles"));
 
-    let start_url = loaded.clubefii.base_url.clone();
-    harness
-        .launch(start_url.as_str())
-        .map_err(CliError::fatal)?;
+    println!("explore start: {url}");
+    harness.launch(&url).map_err(CliError::fatal)?;
 
-    println!("explore start");
-    println!("  navigate the site to the sections you want to capture.");
-    println!("  when on a listing page, press Enter to capture a recipe candidate.");
-    println!("  type 'done' and press Enter to finish.\n");
+    // Wait for initial page load, then dismiss any blocking overlays
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    harness.dismiss_overlays();
 
-    let sections = &loaded.collector.sections;
-    let mut captured_count = 0u32;
+    println!("  discovering tabs...");
+    let tabs = harness.discover_tab_anchors().map_err(CliError::fatal)?;
+    let tabs: Vec<_> = tabs
+        .into_iter()
+        .filter(|t| {
+            let a = t.anchor.as_str();
+            // Skip non-content anchors
+            a.starts_with('#') && a != "#" && !a.contains("modal") && !a.contains("Modal")
+        })
+        .collect();
 
-    loop {
-        print!("[explore] section name (or 'done'): ");
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|err| CliError::fatal(format!("failed reading input: {err}")))?;
-        let input = input.trim();
+    println!("  found {} tabs:\n", tabs.len());
+    for (i, tab) in tabs.iter().enumerate() {
+        println!("    {i:>2}. {} ({})", tab.label, tab.anchor);
+    }
 
-        if input == "done" || input.is_empty() {
-            break;
-        }
+    println!("\n  crawling each tab...\n");
 
-        let section = input.to_string();
-        if !sections.iter().any(|s| s == &section) {
-            println!(
-                "  unknown section '{section}'; expected one of: {}",
-                sections.join(", ")
-            );
+    let base_url = harness.current_url().unwrap_or_else(|_| url.clone());
+    let base_url_no_hash = base_url.split('#').next().unwrap_or(&base_url);
+
+    for (i, tab) in tabs.iter().enumerate() {
+        let section_name = tab.anchor.trim_start_matches('#');
+        println!("  [{}/{}] {} ...", i + 1, tabs.len(), section_name);
+
+        // Click the tab link and wait for content to load
+        let click_selector = format!("a[href='{}']", tab.anchor);
+        if let Err(err) = harness.click_and_wait(&click_selector, 10_000) {
+            println!("    skip: click failed: {err}");
             continue;
         }
 
-        println!("  capturing page fingerprint...");
-        let fingerprint = match harness.capture_page_fingerprint() {
-            Ok(fp) => fp,
+        // Capture structural summary
+        let summary = match harness.capture_tab_summary() {
+            Ok(s) => s,
             Err(err) => {
-                println!("  capture failed: {err}");
-                let _ = bundle_writer.save_bundle(
-                    &FailureBundleDiagnostics {
-                        section: section.clone(),
-                        url: "unknown".to_string(),
-                        error: err.clone(),
-                        recipe_id: None,
-                    },
-                    None,
-                );
+                println!("    skip: capture failed: {err}");
                 continue;
             }
         };
 
+        // Save fixture
         let page_html = harness.page_source().ok();
         if let Some(html) = &page_html {
-            match fixture_writer.save_page(&section, &fingerprint.url, html) {
-                Ok(path) => println!("  fixture saved: {}", path.display()),
-                Err(err) => println!("  fixture save failed: {err}"),
+            let tab_url = format!("{base_url_no_hash}{}", tab.anchor);
+            match fixture_writer.save_page(section_name, &tab_url, html) {
+                Ok(path) => println!("    fixture: {}", path.display()),
+                Err(err) => println!("    fixture save failed: {err}"),
             }
         }
 
-        let selector_json = build_selector_json(&fingerprint.candidate_selectors);
-        let confidence = compute_fingerprint_confidence(&fingerprint.candidate_selectors);
-        let name = format!("{section}-explore-{captured_count}");
+        // Print summary
+        if summary.tables.is_empty()
+            && summary.link_patterns.is_empty()
+            && summary.repeating_groups.is_empty()
+        {
+            println!("    content: no tables, link patterns, or repeating groups found");
+        }
+
+        for table in &summary.tables {
+            let headers_str = if table.headers.is_empty() {
+                "no headers".to_string()
+            } else {
+                table.headers.join(" | ")
+            };
+            println!(
+                "    table: {} ({} rows, {} cols) [{}]",
+                table.selector_hint, table.row_count, table.column_count, headers_str
+            );
+        }
+
+        for rg in &summary.repeating_groups {
+            let fields_str = if rg.sample_fields.is_empty() {
+                String::new()
+            } else {
+                format!(" fields: {}", rg.sample_fields.join(", "))
+            };
+            println!(
+                "    repeat: {} > {} (×{}){}",
+                rg.container_hint, rg.child_selector, rg.count, fields_str
+            );
+        }
+
+        for lp in &summary.link_patterns {
+            println!(
+                "    links: {} (×{}) sample: \"{}\"",
+                lp.pattern, lp.count, lp.sample_text
+            );
+        }
+
+        if summary.text_blocks > 0 {
+            println!("    text blocks: {}", summary.text_blocks);
+        }
+
+        // Save recipe for this tab
+        let selector_json = build_tab_selector_json(&summary);
+        let confidence = compute_tab_confidence(&summary);
+        let name = format!("{section_name}-auto");
         let now = store::now_epoch_seconds().map_err(CliError::fatal)?;
 
         let recipe_id = store
-            .insert_recipe(&section, &name, Some(confidence), &selector_json, None, now)
+            .insert_recipe(
+                section_name,
+                &name,
+                Some(confidence),
+                &selector_json,
+                None,
+                now,
+            )
             .map_err(CliError::fatal)?;
 
-        println!("  recipe captured: id={recipe_id} name={name} confidence={confidence:.2}");
-        println!("  url: {}", fingerprint.url);
-        println!("  title: {}", fingerprint.title);
-        println!(
-            "  selectors: {} candidates found",
-            fingerprint.candidate_selectors.len()
-        );
-
-        captured_count += 1;
+        println!("    recipe: id={recipe_id} confidence={confidence:.2}\n");
     }
 
     let _ = harness.shutdown();
-    println!("\nexplore start: captured {captured_count} recipe candidate(s)");
-    if captured_count > 0 {
-        println!("  run `omens explore review` to see candidates");
-        println!("  run `omens explore promote <id>` to activate one");
-    }
+    println!("explore start: done. {} tabs crawled.", tabs.len());
+    println!("  run `omens explore review` to see all recipes");
     Ok(())
 }
 
@@ -265,31 +351,58 @@ pub fn explore_promote(recipe_id: String) -> Result<(), CliError> {
     Ok(())
 }
 
-fn build_selector_json(candidates: &[crate::browser::harness::CandidateSelector]) -> String {
-    use crate::browser::harness::SelectorKind;
-
-    let listing: Vec<&str> = candidates
+fn build_tab_selector_json(summary: &TabSummary) -> String {
+    let tables: Vec<String> = summary
+        .tables
         .iter()
-        .filter(|c| c.kind == SelectorKind::ListingItem)
-        .map(|c| c.selector.as_str())
-        .collect();
-    let pagination: Vec<&str> = candidates
-        .iter()
-        .filter(|c| c.kind == SelectorKind::PaginationLink)
-        .map(|c| c.selector.as_str())
-        .collect();
-    let detail: Vec<&str> = candidates
-        .iter()
-        .filter(|c| c.kind == SelectorKind::DetailLink)
-        .map(|c| c.selector.as_str())
+        .map(|t| {
+            format!(
+                "{{\"hint\":\"{}\",\"rows\":{},\"cols\":{},\"headers\":{}}}",
+                t.selector_hint.replace('\"', "\\\""),
+                t.row_count,
+                t.column_count,
+                json_string_array(&t.headers.iter().map(|h| h.as_str()).collect::<Vec<_>>()),
+            )
+        })
         .collect();
 
-    // Simple JSON construction without serde dependency in this module
+    let links: Vec<String> = summary
+        .link_patterns
+        .iter()
+        .map(|l| {
+            format!(
+                "{{\"pattern\":\"{}\",\"count\":{}}}",
+                l.pattern.replace('\"', "\\\""),
+                l.count,
+            )
+        })
+        .collect();
+
+    let groups: Vec<String> = summary
+        .repeating_groups
+        .iter()
+        .map(|g| {
+            format!(
+                "{{\"container\":\"{}\",\"child\":\"{}\",\"count\":{},\"fields\":{}}}",
+                g.container_hint.replace('\"', "\\\""),
+                g.child_selector.replace('\"', "\\\""),
+                g.count,
+                json_string_array(
+                    &g.sample_fields
+                        .iter()
+                        .map(|f| f.as_str())
+                        .collect::<Vec<_>>()
+                ),
+            )
+        })
+        .collect();
+
     format!(
-        "{{\"listing\":{},\"pagination\":{},\"detail\":{}}}",
-        json_string_array(&listing),
-        json_string_array(&pagination),
-        json_string_array(&detail),
+        "{{\"tables\":[{}],\"links\":[{}],\"repeating_groups\":[{}],\"text_blocks\":{}}}",
+        tables.join(","),
+        links.join(","),
+        groups.join(","),
+        summary.text_blocks,
     )
 }
 
@@ -301,33 +414,34 @@ fn json_string_array(items: &[&str]) -> String {
     format!("[{}]", entries.join(","))
 }
 
-fn compute_fingerprint_confidence(
-    candidates: &[crate::browser::harness::CandidateSelector],
-) -> f64 {
-    let has_listing = candidates
-        .iter()
-        .any(|c| c.kind == SelectorKind::ListingItem);
-    let has_pagination = candidates
-        .iter()
-        .any(|c| c.kind == SelectorKind::PaginationLink);
-    let has_detail = candidates
-        .iter()
-        .any(|c| c.kind == SelectorKind::DetailLink);
+fn compute_tab_confidence(summary: &TabSummary) -> f64 {
+    let has_tables = !summary.tables.is_empty();
+    let has_links = !summary.link_patterns.is_empty();
+    let has_data_tables = summary.tables.iter().any(|t| t.row_count >= 3);
+    let has_repeating = summary.repeating_groups.iter().any(|g| g.count >= 3);
 
     let mut score = 0.0;
-    if has_listing {
+    if has_data_tables {
         score += 0.5;
-    }
-    if has_pagination {
+    } else if has_tables {
         score += 0.25;
     }
-    if has_detail {
-        score += 0.25;
+    if has_repeating {
+        score += 0.4;
+    }
+    if has_links {
+        score += 0.3;
+    }
+    if summary.text_blocks > 5 {
+        score += 0.2;
+    }
+    if score > 1.0 {
+        score = 1.0;
     }
     score
 }
 
-pub fn collect_run(sections: String) -> Result<(), CliError> {
+pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
@@ -337,50 +451,346 @@ pub fn collect_run(sections: String) -> Result<(), CliError> {
         Err(LockError::Runtime(message)) => return Err(CliError::fatal(message)),
     };
 
+    // Resolve tickers: CLI flag > config > error
+    let ticker_list: Vec<String> = if let Some(t) = tickers {
+        t.split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else if !loaded.collector.tickers.is_empty() {
+        loaded
+            .collector
+            .tickers
+            .iter()
+            .map(|s| s.to_uppercase())
+            .collect()
+    } else {
+        return Err(CliError::fatal(
+            "no tickers specified; use --tickers TICKER,... or set collector.tickers in config",
+        ));
+    };
+
+    let section_filter: Option<Vec<String>> = sections.map(|s| {
+        s.split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+
     let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
     store.migrate().map_err(CliError::fatal)?;
 
+    let sections_csv = format!(
+        "tickers={} sections={}",
+        ticker_list.join(","),
+        section_filter
+            .as_ref()
+            .map(|v| v.join(","))
+            .unwrap_or_else(|| "all".to_string())
+    );
     let started = store::now_epoch_seconds().map_err(CliError::fatal)?;
     let run_id = store
-        .start_run(sections.as_str(), started)
+        .start_run(&sections_csv, started)
         .map_err(CliError::fatal)?;
 
-    let collect_result: Result<(), String> = Ok(());
+    let collect_result = do_collect(
+        &loaded,
+        &store,
+        run_id,
+        &ticker_list,
+        section_filter.as_deref(),
+    );
+
     let ended = store::now_epoch_seconds().map_err(CliError::fatal)?;
     match collect_result {
-        Ok(()) => store
-            .finish_run(run_id, RunStatus::Success, ended, None)
-            .map_err(CliError::fatal)?,
+        Ok(stats) => {
+            store
+                .finish_run(run_id, RunStatus::Success, ended, None)
+                .map_err(CliError::fatal)?;
+            let retention = store
+                .build_retention_plan(
+                    ended,
+                    loaded.storage.retention.keep_runs_days,
+                    loaded.storage.retention.keep_versions_per_item,
+                )
+                .map_err(CliError::fatal)?;
+            store.apply_retention(&retention).map_err(CliError::fatal)?;
+
+            println!("collect run");
+            println!("  run_id: {run_id}");
+            println!("  tickers: {}", ticker_list.join(", "));
+            println!("  db_path: {}", loaded.resolved.storage_db_path.display());
+            println!("  status: success");
+            println!("  items_seen: {}", stats.items_seen);
+            println!("  items_new: {}", stats.items_new);
+            println!("  items_changed: {}", stats.items_changed);
+            println!(
+                "  retention: runs_deleted={}, versions_deleted={}",
+                retention.run_ids_to_delete.len(),
+                retention.version_ids_to_delete.len()
+            );
+            Ok(())
+        }
         Err(err) => {
             let _ = store.finish_run(run_id, RunStatus::Failed, ended, Some(err.as_str()));
-            return Err(CliError::fatal(err));
+            Err(CliError::fatal(err))
         }
     }
-    let persisted = store
-        .run_row(run_id)
-        .map_err(CliError::fatal)?
-        .ok_or_else(|| CliError::fatal(format!("run row {run_id} not found after finalize")))?;
-    let retention = store
-        .build_retention_plan(
-            ended,
-            loaded.storage.retention.keep_runs_days,
-            loaded.storage.retention.keep_versions_per_item,
-        )
-        .map_err(CliError::fatal)?;
+}
 
-    println!("collect run");
-    println!("  run_id: {run_id}");
-    println!("  sections: {sections}");
-    println!("  db_path: {}", loaded.resolved.storage_db_path.display());
-    println!("  status: success");
-    println!("  persisted_status: {}", persisted.0);
-    println!(
-        "  retention_candidates: runs={}, versions={}",
-        retention.run_ids_to_delete.len(),
-        retention.version_ids_to_delete.len()
-    );
-    println!("  note: collection pipeline is not wired yet; run record persisted");
-    Ok(())
+fn do_collect(
+    loaded: &OmensConfig,
+    store: &Store,
+    run_id: i64,
+    tickers: &[String],
+    section_filter: Option<&[String]>,
+) -> Result<CollectStats, String> {
+    let manager = BrowserManager::from_config(loaded).map_err(|e| e.to_string())?;
+    let browser_binary = manager.browser_binary_path().map_err(|e| e.to_string())?;
+    let profile_path = manager.default_profile_dir().to_path_buf();
+    std::fs::create_dir_all(&profile_path)
+        .map_err(|e| format!("failed to create browser profile: {e}"))?;
+
+    let mut launch_env = Vec::<(String, String)>::new();
+    let display_mgr = DisplayManager::new(&loaded.resolved.root_dir);
+    if let Ok(status) = display_mgr.status()
+        && let Some(session) = status.session
+    {
+        launch_env.push((
+            "XDG_RUNTIME_DIR".to_string(),
+            session.runtime_dir.display().to_string(),
+        ));
+        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+    }
+
+    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
+        .map_err(|e| e.to_string())?;
+
+    let base_url = &loaded.clubefii.base_url;
+    let mut stats = CollectStats {
+        items_seen: 0,
+        items_new: 0,
+        items_changed: 0,
+    };
+    let mut first = true;
+
+    for ticker in tickers {
+        let fund_url = format!("{base_url}/fiis/{ticker}");
+        println!("collect: navigating to {fund_url}");
+
+        if first {
+            harness.launch(&fund_url).map_err(|e| e.to_string())?;
+            first = false;
+        } else {
+            harness.navigate(&fund_url).map_err(|e| e.to_string())?;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        harness.dismiss_overlays();
+
+        // Load active recipes filtered by section_filter
+        let all_recipes = store.list_recipes(None)?;
+        let active_recipes: Vec<_> = all_recipes
+            .iter()
+            .filter(|r| r.status == RecipeStatus::Active)
+            .filter(|r| {
+                section_filter
+                    .map(|f| f.iter().any(|s| s == &r.section))
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        if active_recipes.is_empty() {
+            println!(
+                "  [{ticker}] no active recipes found; run `omens explore start {ticker}` \
+                 then `omens explore promote <id>`"
+            );
+            continue;
+        }
+
+        for recipe in &active_recipes {
+            let section = &recipe.section;
+            println!("  [{ticker}/{section}] extracting...");
+
+            // Click the tab anchor
+            let click_sel = format!("a[href='#{section}']");
+            if let Err(e) = harness.click_and_wait(&click_sel, 10_000) {
+                println!("    skip: tab click failed: {e}");
+                let now = store::now_epoch_seconds()?;
+                let _ = store.update_recipe_status(recipe.id, RecipeStatus::Degraded, now);
+                continue;
+            }
+
+            // Parse selector JSON from recipe
+            let selector: RecipeSelectorJson =
+                serde_json::from_str(&recipe.selector_json).unwrap_or_default();
+
+            let now = store::now_epoch_seconds()?;
+            let tab_url = format!("{base_url}/fiis/{ticker}#{section}");
+
+            // Pick the best table to extract:
+            // 1. First table with headers AND ≥3 rows (labelled, non-noise)
+            // 2. First table with ≥3 rows (non-noise, no headers)
+            // 3. First table (last resort)
+            // This skips single-row noise elements like #tab_colaboradores and
+            // prefers labelled data tables (e.g. #tabela_proventos .thin) over
+            // unlabelled summary blocks (e.g. #tabela_info_basica).
+            let primary_table = selector
+                .tables
+                .iter()
+                .find(|t| t.rows >= 3 && !t.headers.is_empty())
+                .or_else(|| selector.tables.iter().find(|t| t.rows >= 3))
+                .or_else(|| selector.tables.first());
+
+            if let Some(table) = primary_table {
+                // Tabular extraction
+                let rows = match harness.extract_table_rows(&table.hint, 10_000) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        println!("    skip: table extraction failed: {e}");
+                        let _ = store.update_recipe_status(recipe.id, RecipeStatus::Degraded, now);
+                        continue;
+                    }
+                };
+                println!("    extracted {} rows from {}", rows.len(), table.hint);
+
+                for (row_idx, cells) in rows.iter().enumerate() {
+                    let mut fields: HashMap<String, String> = table
+                        .headers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, h)| !h.trim().is_empty())
+                        .map(|(i, h)| {
+                            let val = cells.get(i).cloned().unwrap_or_default();
+                            (h.clone(), val)
+                        })
+                        .collect();
+                    // Fill unnamed columns (skip blank overflow cells)
+                    for (i, cell) in cells.iter().enumerate() {
+                        if i >= table.headers.len() && !cell.trim().is_empty() {
+                            fields.insert(format!("col_{i}"), cell.clone());
+                        }
+                    }
+
+                    let primary_key = cells
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| row_idx.to_string());
+                    let external_id = format!("{ticker}/{section}/{primary_key}");
+                    let stable_key = format!("external_id:{external_id}");
+
+                    let normalized_json = build_normalized_json(&fields);
+                    let hash = store::content_hash_fnv(&normalized_json);
+
+                    let (item_id, is_new) = store.upsert_item(
+                        "clubefii",
+                        section,
+                        Some(&tab_url),
+                        Some(&external_id),
+                        &stable_key,
+                        Some(&primary_key),
+                        None,
+                        &hash,
+                        &normalized_json,
+                        now,
+                    )?;
+                    let is_changed = store.insert_item_version_on_change(
+                        item_id,
+                        run_id,
+                        &hash,
+                        &normalized_json,
+                        now,
+                    )?;
+
+                    stats.items_seen += 1;
+                    if is_new {
+                        stats.items_new += 1;
+                    } else if is_changed {
+                        stats.items_changed += 1;
+                    }
+                }
+            } else if let Some(group) = selector.repeating_groups.first() {
+                // Repeating-group extraction
+                let field_ids: Vec<&str> = group
+                    .fields
+                    .iter()
+                    .filter_map(|f| f.split(": ").next())
+                    .collect();
+
+                let rows = match harness.extract_repeating_group_rows(
+                    &group.container,
+                    &group.child,
+                    &field_ids,
+                    10_000,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        println!("    skip: group extraction failed: {e}");
+                        let _ = store.update_recipe_status(recipe.id, RecipeStatus::Degraded, now);
+                        continue;
+                    }
+                };
+                println!(
+                    "    extracted {} items from {}",
+                    rows.len(),
+                    group.container
+                );
+
+                for (row_idx, fields) in rows.iter().enumerate() {
+                    let first_fid = field_ids.first().copied().unwrap_or("id");
+                    let primary_key = fields
+                        .get(first_fid)
+                        .cloned()
+                        .unwrap_or_else(|| row_idx.to_string());
+                    let external_id = format!("{ticker}/{section}/{primary_key}");
+                    let stable_key = format!("external_id:{external_id}");
+
+                    let normalized_json = build_normalized_json(fields);
+                    let hash = store::content_hash_fnv(&normalized_json);
+
+                    let (item_id, is_new) = store.upsert_item(
+                        "clubefii",
+                        section,
+                        Some(&tab_url),
+                        Some(&external_id),
+                        &stable_key,
+                        Some(&primary_key),
+                        None,
+                        &hash,
+                        &normalized_json,
+                        now,
+                    )?;
+                    let is_changed = store.insert_item_version_on_change(
+                        item_id,
+                        run_id,
+                        &hash,
+                        &normalized_json,
+                        now,
+                    )?;
+
+                    stats.items_seen += 1;
+                    if is_new {
+                        stats.items_new += 1;
+                    } else if is_changed {
+                        stats.items_changed += 1;
+                    }
+                }
+            } else {
+                println!("    skip: no extractable table or repeating group in recipe");
+            }
+        }
+    }
+
+    harness.shutdown().ok();
+    Ok(stats)
+}
+
+fn build_normalized_json(fields: &HashMap<String, String>) -> String {
+    let mut sorted: Vec<(&str, &str)> = fields
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    sorted.sort_by_key(|(k, _)| *k);
+    serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
 }
 
 pub fn config_doctor() -> Result<(), CliError> {

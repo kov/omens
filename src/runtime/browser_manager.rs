@@ -85,10 +85,24 @@ impl BrowserManager {
 
     pub fn browser_binary_path(&self) -> Result<PathBuf, String> {
         match self.mode {
-            BrowserMode::System => self
-                .system_binary_path
-                .clone()
-                .ok_or_else(|| "browser.system_binary_path is required in system mode".to_string()),
+            BrowserMode::System => {
+                if let Some(path) = &self.system_binary_path {
+                    return Ok(path.clone());
+                }
+                let well_known = [
+                    "/usr/bin/chromium",
+                    "/usr/bin/chromium-browser",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/google-chrome-stable",
+                ];
+                for candidate in well_known {
+                    let p = PathBuf::from(candidate);
+                    if p.exists() {
+                        return Ok(p);
+                    }
+                }
+                Err("no system browser found; set browser.system_binary_path in config".to_string())
+            }
             BrowserMode::Bundled => {
                 let current = self.chromium_dir().join("current");
                 let candidates = [
@@ -764,6 +778,7 @@ mod tests {
 
     fn bundled_manager(root: PathBuf) -> BrowserManager {
         let mut config = OmensConfig::default();
+        config.browser.mode = "bundled".to_string();
         config.resolved.root_dir = root.clone();
         config.resolved.browser_user_data_dir = root.join("browser/profiles/default");
         BrowserManager::from_config(&config).expect("manager should build")

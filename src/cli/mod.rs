@@ -46,10 +46,10 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::AuthBootstrap { ephemeral, display } => {
             commands::auth_bootstrap(ephemeral, display)
         }
-        Command::ExploreStart => commands::explore_start(),
+        Command::ExploreStart { url } => commands::explore_start(url),
         Command::ExploreReview => commands::explore_review(),
         Command::ExplorePromote { recipe_id } => commands::explore_promote(recipe_id),
-        Command::CollectRun { sections } => commands::collect_run(sections),
+        Command::CollectRun { sections, tickers } => commands::collect_run(sections, tickers),
         Command::ReportLatest => commands::noop("report latest"),
         Command::BrowserStatus => commands::browser_status(),
         Command::BrowserInstall { force } => commands::browser_install(force),
@@ -73,10 +73,10 @@ fn print_usage(topic: HelpTopic) {
             println!(
                 "Usage:\n  \
   omens auth bootstrap [--ephemeral] [--display]\n  \
-  omens explore start\n  \
+  omens explore start <url-or-ticker>\n  \
   omens explore review\n  \
   omens explore promote <recipe_id>\n  \
-  omens collect run [--sections csv]\n  \
+  omens collect run [--sections csv] [--tickers csv]\n  \
   omens report latest\n  \
   omens config doctor\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
@@ -86,14 +86,18 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Auth => println!("Usage:\n  omens auth bootstrap [--ephemeral] [--display]"),
         HelpTopic::Explore => {
             println!(
-                "Usage:\n  omens explore start\n  omens explore review\n  omens explore promote <recipe_id>"
+                "Usage:\n  omens explore start <url-or-ticker>\n  omens explore review\n  omens explore promote <recipe_id>"
             )
         }
-        HelpTopic::Collect => println!("Usage:\n  omens collect run [--sections csv]"),
+        HelpTopic::Collect => {
+            println!("Usage:\n  omens collect run [--sections csv] [--tickers csv]")
+        }
         HelpTopic::Report => println!("Usage:\n  omens report latest"),
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
         HelpTopic::Browser => {
-            println!("Usage:\n  omens browser status|install [--force]|upgrade|rollback|reset-profile")
+            println!(
+                "Usage:\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
+            )
         }
         HelpTopic::Display => println!(
             "Usage:\n  omens display start [--listen addr:port]\n  omens display stop\n  omens display status"
@@ -114,22 +118,38 @@ enum HelpTopic {
 }
 
 enum Command {
-    AuthBootstrap { ephemeral: bool, display: bool },
-    ExploreStart,
+    AuthBootstrap {
+        ephemeral: bool,
+        display: bool,
+    },
+    ExploreStart {
+        url: String,
+    },
     ExploreReview,
-    ExplorePromote { recipe_id: String },
-    CollectRun { sections: String },
+    ExplorePromote {
+        recipe_id: String,
+    },
+    CollectRun {
+        sections: Option<String>,
+        tickers: Option<String>,
+    },
     ReportLatest,
     ConfigDoctor,
     BrowserStatus,
-    BrowserInstall { force: bool },
+    BrowserInstall {
+        force: bool,
+    },
     BrowserUpgrade,
     BrowserRollback,
     BrowserResetProfile,
-    DisplayStart { listen_addr: String },
+    DisplayStart {
+        listen_addr: String,
+    },
     DisplayStop,
     DisplayStatus,
-    Help { topic: HelpTopic },
+    Help {
+        topic: HelpTopic,
+    },
 }
 
 impl Command {
@@ -208,8 +228,21 @@ fn parse_explore(args: &[String]) -> Result<Command, String> {
             topic: HelpTopic::Explore,
         });
     }
-    if args.len() == 3 && args[2] == "start" {
-        return Ok(Command::ExploreStart);
+    if (args.len() == 3 || args.len() == 4) && args[2] == "start" {
+        let url = if args.len() == 4 {
+            let arg = &args[3];
+            if arg.starts_with("http://") || arg.starts_with("https://") {
+                arg.clone()
+            } else {
+                format!("https://www.clubefii.com.br/fiis/{arg}")
+            }
+        } else {
+            return Err(
+                "usage: omens explore start <url-or-ticker>\n  example: omens explore start XPML11"
+                    .to_string(),
+            );
+        };
+        return Ok(Command::ExploreStart { url });
     }
     if args.len() == 3 && args[2] == "review" {
         return Ok(Command::ExploreReview);
@@ -228,17 +261,36 @@ fn parse_collect(args: &[String]) -> Result<Command, String> {
             topic: HelpTopic::Collect,
         });
     }
-    if args.len() == 3 && args[2] == "run" {
-        return Ok(Command::CollectRun {
-            sections: "news,material-facts".to_string(),
-        });
+    if args.len() >= 3 && args[2] == "run" {
+        let mut sections = None::<String>;
+        let mut tickers = None::<String>;
+        let mut i = 3usize;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--sections" => {
+                    let val = args
+                        .get(i + 1)
+                        .ok_or_else(|| "missing value after --sections".to_string())?;
+                    sections = Some(val.clone());
+                    i += 2;
+                }
+                "--tickers" => {
+                    let val = args
+                        .get(i + 1)
+                        .ok_or_else(|| "missing value after --tickers".to_string())?;
+                    tickers = Some(val.clone());
+                    i += 2;
+                }
+                _ => {
+                    return Err(
+                        "usage: omens collect run [--sections csv] [--tickers csv]".to_string()
+                    );
+                }
+            }
+        }
+        return Ok(Command::CollectRun { sections, tickers });
     }
-    if args.len() == 5 && args[2] == "run" && args[3] == "--sections" {
-        return Ok(Command::CollectRun {
-            sections: args[4].clone(),
-        });
-    }
-    Err("usage: omens collect run [--sections csv]".to_string())
+    Err("usage: omens collect run [--sections csv] [--tickers csv]".to_string())
 }
 
 fn parse_report(args: &[String]) -> Result<Command, String> {
@@ -390,7 +442,28 @@ mod tests {
             .expect("collect run should parse");
 
         match command {
-            Command::CollectRun { sections } => assert_eq!(sections, "news"),
+            Command::CollectRun { sections, .. } => {
+                assert_eq!(sections, Some("news".to_string()))
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn parse_collect_tickers_flag() {
+        let command = Command::parse(&to_args(&[
+            "omens",
+            "collect",
+            "run",
+            "--tickers",
+            "BRCR11,RBRX11",
+        ]))
+        .expect("collect run with --tickers should parse");
+
+        match command {
+            Command::CollectRun { tickers, .. } => {
+                assert_eq!(tickers, Some("BRCR11,RBRX11".to_string()))
+            }
             _ => panic!("unexpected command variant"),
         }
     }

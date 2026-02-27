@@ -186,14 +186,45 @@ mod tests {
             Ok("<html>mock</html>".to_string())
         }
 
-        fn capture_page_fingerprint(
-            &self,
-        ) -> Result<crate::browser::harness::PageFingerprint, String> {
-            Ok(crate::browser::harness::PageFingerprint {
-                url: self.current_url()?,
-                title: "Mock Page".to_string(),
-                candidate_selectors: Vec::new(),
+        fn navigate(&self, _url: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn click_and_wait(&self, _selector: &str, _settle_ms: u64) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn dismiss_overlays(&self) {}
+
+        fn discover_tab_anchors(&self) -> Result<Vec<crate::browser::harness::TabAnchor>, String> {
+            Ok(Vec::new())
+        }
+
+        fn capture_tab_summary(&self) -> Result<crate::browser::harness::TabSummary, String> {
+            Ok(crate::browser::harness::TabSummary {
+                tables: Vec::new(),
+                link_patterns: Vec::new(),
+                repeating_groups: Vec::new(),
+                text_blocks: 0,
             })
+        }
+
+        fn extract_table_rows(
+            &self,
+            _selector_hint: &str,
+            _max_rows: usize,
+        ) -> Result<Vec<Vec<String>>, String> {
+            Ok(Vec::new())
+        }
+
+        fn extract_repeating_group_rows(
+            &self,
+            _container_hint: &str,
+            _child_selector: &str,
+            _field_ids: &[&str],
+            _max_rows: usize,
+        ) -> Result<Vec<std::collections::HashMap<String, String>>, String> {
+            Ok(Vec::new())
         }
 
         fn shutdown(&mut self) -> Result<(), String> {
