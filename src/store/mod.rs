@@ -112,6 +112,29 @@ pub struct RetentionPlan {
     pub version_ids_to_delete: Vec<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ItemVersionForAnalysis {
+    pub item_id: i64,
+    pub section: String,
+    pub stable_key: String,
+    pub payload_json: String,
+    pub version_count: i64, // 1 = new item, >1 = changed item
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SignalRow {
+    pub id: i64,
+    pub item_id: i64,
+    pub run_id: i64,
+    pub kind: String,
+    pub severity: String,
+    pub confidence: f64,
+    pub reasons_json: Option<String>,
+    pub summary: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecipeStatus {
     PendingReview,
@@ -509,6 +532,114 @@ impl Store {
                 .map_err(|err| format!("failed deleting item_version {version_id}: {err}"))?;
         }
         Ok(())
+    }
+
+    /// Return all item versions inserted in this run, with how many total versions each item has.
+    pub fn items_for_analysis(
+        &self,
+        run_id: i64,
+    ) -> Result<Vec<ItemVersionForAnalysis>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT i.id, i.section, i.stable_key, iv.payload_json,
+                        (SELECT COUNT(*) FROM item_versions WHERE item_id = i.id) AS version_count
+                 FROM item_versions iv
+                 JOIN items i ON i.id = iv.item_id
+                 WHERE iv.run_id = ?1",
+            )
+            .map_err(|err| format!("failed preparing items_for_analysis query: {err}"))?;
+
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                Ok(ItemVersionForAnalysis {
+                    item_id: row.get(0)?,
+                    section: row.get(1)?,
+                    stable_key: row.get(2)?,
+                    payload_json: row.get(3)?,
+                    version_count: row.get(4)?,
+                })
+            })
+            .map_err(|err| format!("failed querying items_for_analysis: {err}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|err| format!("failed reading analysis row: {err}"))?);
+        }
+        Ok(result)
+    }
+
+    /// Insert a signal for an item version.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_signal(
+        &self,
+        item_id: i64,
+        run_id: i64,
+        kind: &str,
+        severity: &str,
+        confidence: f64,
+        reasons: &[String],
+        summary: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        let reasons_json = serde_json::to_string(reasons)
+            .map_err(|err| format!("failed serializing signal reasons: {err}"))?;
+        self.conn
+            .execute(
+                "INSERT INTO signals(item_id, run_id, kind, severity, confidence, reasons_json, summary, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![item_id, run_id, kind, severity, confidence, reasons_json, summary, now],
+            )
+            .map_err(|err| format!("failed inserting signal: {err}"))?;
+        Ok(())
+    }
+
+    /// Return all signals for a given run. Used by Phase 8 `report latest`.
+    #[allow(dead_code)]
+    pub fn signals_for_run(&self, run_id: i64) -> Result<Vec<SignalRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, item_id, run_id, kind, severity, confidence, reasons_json, summary, created_at
+                 FROM signals WHERE run_id = ?1 ORDER BY id",
+            )
+            .map_err(|err| format!("failed preparing signals_for_run query: {err}"))?;
+
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                Ok(SignalRow {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    severity: row.get(4)?,
+                    confidence: row.get(5)?,
+                    reasons_json: row.get(6)?,
+                    summary: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })
+            .map_err(|err| format!("failed querying signals_for_run: {err}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|err| format!("failed reading signal row: {err}"))?);
+        }
+        Ok(result)
+    }
+
+    /// Return the id of the most recently started run, or None if no runs exist.
+    /// Used by Phase 8 `report latest`.
+    #[allow(dead_code)]
+    pub fn latest_run_id(&self) -> Result<Option<i64>, String> {
+        self.conn
+            .query_row(
+                "SELECT id FROM runs ORDER BY started_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| format!("failed querying latest run_id: {err}"))
     }
 
     pub fn update_recipe_status(
@@ -925,6 +1056,107 @@ mod tests {
 
         let remaining = store.run_row(run_id).expect("query");
         assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn items_for_analysis_returns_version_count() {
+        let root = unique_temp_dir("items-for-analysis");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let run1 = store.start_run("proventos", 100).expect("run1");
+        let run2 = store.start_run("proventos", 200).expect("run2");
+
+        let (item_id, _) = store
+            .upsert_item("clubefii", "proventos", None, None, "key:A", None, None, "h1", "{}", 100)
+            .expect("upsert item");
+
+        // Insert first version in run1
+        store
+            .insert_item_version_on_change(item_id, run1, "h1", r#"[["v","1"]]"#, 100)
+            .expect("version 1");
+        // Insert second version in run2 (changed)
+        store
+            .insert_item_version_on_change(item_id, run2, "h2", r#"[["v","2"]]"#, 200)
+            .expect("version 2");
+
+        // items_for_analysis for run2 should return the item with version_count=2
+        let rows = store.items_for_analysis(run2).expect("analysis rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].item_id, item_id);
+        assert_eq!(rows[0].version_count, 2);
+        assert_eq!(rows[0].section, "proventos");
+
+        // items_for_analysis for run1 should show version_count=2 (total across all runs)
+        let rows1 = store.items_for_analysis(run1).expect("analysis rows run1");
+        assert_eq!(rows1.len(), 1);
+        assert_eq!(rows1[0].version_count, 2);
+    }
+
+    #[test]
+    fn insert_signal_and_signals_for_run_roundtrip() {
+        let root = unique_temp_dir("signals-roundtrip");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let run_id = store.start_run("proventos", 100).expect("run");
+
+        store
+            .insert_signal(
+                42,
+                run_id,
+                "dividend",
+                "high",
+                0.9,
+                &["dividend amount revised".to_string()],
+                "dividend changed: key:A",
+                100,
+            )
+            .expect("insert signal");
+
+        let sigs = store.signals_for_run(run_id).expect("signals_for_run");
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].item_id, 42);
+        assert_eq!(sigs[0].run_id, run_id);
+        assert_eq!(sigs[0].kind, "dividend");
+        assert_eq!(sigs[0].severity, "high");
+        assert!((sigs[0].confidence - 0.9).abs() < 1e-9);
+        assert_eq!(sigs[0].summary, "dividend changed: key:A");
+        assert!(sigs[0].reasons_json.as_deref().unwrap_or("").contains("revised"));
+    }
+
+    #[test]
+    fn signals_for_run_returns_empty_for_unknown_run() {
+        let root = unique_temp_dir("signals-empty");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let sigs = store.signals_for_run(9999).expect("signals_for_run");
+        assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn latest_run_id_returns_most_recent() {
+        let root = unique_temp_dir("latest-run");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        // No runs yet
+        let none = store.latest_run_id().expect("latest_run_id");
+        assert!(none.is_none());
+
+        let r1 = store.start_run("a", 100).expect("run1");
+        let r2 = store.start_run("b", 200).expect("run2");
+        let r3 = store.start_run("c", 50).expect("run3"); // started_at lower than r2
+
+        let latest = store.latest_run_id().expect("latest_run_id").expect("should have a run");
+        // r2 has started_at=200, which is highest
+        assert_eq!(latest, r2);
+        let _ = (r1, r3); // suppress unused warnings
     }
 
     #[test]

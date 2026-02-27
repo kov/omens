@@ -1,3 +1,4 @@
+mod analyze;
 mod auth;
 mod browser;
 mod cli;

@@ -1,3 +1,4 @@
+use crate::analyze;
 use crate::auth::{self, AuthError, AuthValidationConfig, EphemeralProfile};
 use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness, TabSummary};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
@@ -516,6 +517,70 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
                 .map_err(CliError::fatal)?;
             store.apply_retention(&retention).map_err(CliError::fatal)?;
 
+            // Phase 7: analyze new/changed items
+            let raw = store.items_for_analysis(run_id).map_err(CliError::fatal)?;
+            let analysis_items: Vec<analyze::AnalysisItem> = raw
+                .into_iter()
+                .map(|r| analyze::AnalysisItem {
+                    item_id: r.item_id,
+                    section: r.section,
+                    stable_key: r.stable_key,
+                    payload_json: r.payload_json,
+                    is_new: r.version_count == 1,
+                })
+                .collect();
+            let signals = analyze::analyze_items(&analysis_items, &loaded.analysis);
+            for sig in &signals {
+                store
+                    .insert_signal(
+                        sig.item_id,
+                        run_id,
+                        &sig.kind,
+                        sig.severity.as_str(),
+                        sig.confidence,
+                        &sig.reasons,
+                        &sig.summary,
+                        ended,
+                    )
+                    .map_err(CliError::fatal)?;
+            }
+
+            let critical_count = signals
+                .iter()
+                .filter(|s| matches!(s.severity, analyze::Severity::Critical))
+                .count();
+            let high_count = signals
+                .iter()
+                .filter(|s| matches!(s.severity, analyze::Severity::High))
+                .count();
+            let medium_count = signals
+                .iter()
+                .filter(|s| matches!(s.severity, analyze::Severity::Medium))
+                .count();
+            let low_count = signals
+                .iter()
+                .filter(|s| matches!(s.severity, analyze::Severity::Low))
+                .count();
+
+            let mut breakdown_parts: Vec<String> = Vec::new();
+            if critical_count > 0 {
+                breakdown_parts.push(format!("{critical_count} critical"));
+            }
+            if high_count > 0 {
+                breakdown_parts.push(format!("{high_count} high"));
+            }
+            if medium_count > 0 {
+                breakdown_parts.push(format!("{medium_count} medium"));
+            }
+            if low_count > 0 {
+                breakdown_parts.push(format!("{low_count} low"));
+            }
+            let breakdown = if breakdown_parts.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", breakdown_parts.join(", "))
+            };
+
             println!("collect run");
             println!("  run_id: {run_id}");
             println!("  tickers: {}", ticker_list.join(", "));
@@ -524,11 +589,25 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
             println!("  items_seen: {}", stats.items_seen);
             println!("  items_new: {}", stats.items_new);
             println!("  items_changed: {}", stats.items_changed);
+            println!("  signals: {}{}", signals.len(), breakdown);
             println!(
                 "  retention: runs_deleted={}, versions_deleted={}",
                 retention.run_ids_to_delete.len(),
                 retention.version_ids_to_delete.len()
             );
+
+            if !signals.is_empty() {
+                println!("\nSignals:");
+                for sig in &signals {
+                    println!(
+                        "  [{:<8} {:.2}] {}",
+                        sig.severity.as_str().to_uppercase(),
+                        sig.confidence,
+                        sig.summary
+                    );
+                }
+            }
+
             Ok(())
         }
         Err(err) => {
