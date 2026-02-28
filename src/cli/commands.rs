@@ -727,16 +727,79 @@ fn do_collect(
                 };
                 println!("    extracted {} rows from {}", rows.len(), table.hint);
 
-                // Detect non-unique first cells so we can build compound keys
-                // for rows that share the same first cell (e.g. comunicados
-                // where "Categoria" = "Fato Relevante" for every row).
-                let first_cell_counts: HashMap<String, usize> =
-                    rows.iter().fold(HashMap::new(), |mut map, cells| {
-                        if let Some(v) = cells.first() {
-                            *map.entry(v.trim().to_string()).or_insert(0) += 1;
+                // Pre-compute a stable, unique compound primary key for every row.
+                // Rows whose first cell is already unique get a 1-cell key.
+                // Non-unique rows get additional cells appended (from a preferred
+                // header list) until the key is batch-unique or all options are
+                // exhausted.  This handles cases like:
+                //   • Fato Relevante + unique Assunto  → 2-cell key
+                //   • Informe Mensal + N/D Assunto + same Data Referência for
+                //     V.1 & V.2 → 3-cell key (date + Data Entrega)
+                const STABLE_HDRS: &[&str] = &[
+                    "Assunto", "assunto",
+                    "Data Referência", "Data Referencia",
+                    "Data Entrega",
+                    "MÊS REF.", "MES REF.",
+                    "DATA COM",
+                    "Status / Modalidade Envio",
+                ];
+                let is_placeholder =
+                    |v: &str| v.is_empty() || v == "N/D" || v == "N/A" || v == "-" || v == "--";
+
+                // Seed: every row starts with its trimmed first cell (or row index).
+                let mut compound_keys: Vec<String> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cells)| {
+                        let first = cells.first().map(|s| s.trim()).unwrap_or("");
+                        if first.is_empty() { i.to_string() } else { first.to_string() }
+                    })
+                    .collect();
+
+                // Repeatedly extend non-unique keys using the next preferred header.
+                // Use owned-key counts to avoid borrowing compound_keys while mutating it.
+                'outer: for hdr in STABLE_HDRS {
+                    let counts: HashMap<String, usize> =
+                        compound_keys.iter().fold(HashMap::new(), |mut m, k| {
+                            *m.entry(k.clone()).or_insert(0) += 1;
+                            m
+                        });
+                    if counts.values().all(|&c| c <= 1) {
+                        break 'outer;
+                    }
+                    let Some(col_idx) = table.headers.iter().position(|h| h.as_str() == *hdr)
+                    else {
+                        continue;
+                    };
+                    for (i, cells) in rows.iter().enumerate() {
+                        if counts.get(&compound_keys[i]).copied().unwrap_or(0) <= 1 {
+                            continue;
                         }
-                        map
-                    });
+                        if let Some(val) = cells.get(col_idx) {
+                            let t = val.trim();
+                            if !is_placeholder(t) {
+                                compound_keys[i] = format!("{}|{t}", compound_keys[i]);
+                            }
+                        }
+                    }
+                }
+                // Last-resort tiebreaker for any remaining collisions.
+                {
+                    let counts: HashMap<String, usize> =
+                        compound_keys.iter().fold(HashMap::new(), |mut m, k| {
+                            *m.entry(k.clone()).or_insert(0) += 1;
+                            m
+                        });
+                    let tiebreakers: Vec<bool> = compound_keys
+                        .iter()
+                        .map(|k| counts.get(k).copied().unwrap_or(0) > 1)
+                        .collect();
+                    for (i, key) in compound_keys.iter_mut().enumerate() {
+                        if tiebreakers[i] {
+                            *key = format!("{key}|{i}");
+                        }
+                    }
+                }
 
                 for (row_idx, cells) in rows.iter().enumerate() {
                     let mut fields: HashMap<String, String> = table
@@ -756,23 +819,7 @@ fn do_collect(
                         }
                     }
 
-                    let first = cells.first().map(|s| s.trim()).unwrap_or("");
-                    let primary_key = if first.is_empty() {
-                        row_idx.to_string()
-                    } else if first_cell_counts.get(first).copied().unwrap_or(0) <= 1 {
-                        first.to_string()
-                    } else {
-                        // First cell is not unique in this batch — extend with
-                        // the next non-empty cell to form a stable compound key.
-                        let second: String = cells
-                            .iter()
-                            .skip(1)
-                            .map(|s| s.trim())
-                            .find(|s| !s.is_empty())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| row_idx.to_string());
-                        format!("{first}|{second}")
-                    };
+                    let primary_key = compound_keys[row_idx].clone();
                     let external_id = format!("{ticker}/{section}/{primary_key}");
                     let stable_key = format!("external_id:{external_id}");
 
