@@ -123,6 +123,24 @@ pub struct ItemVersionForAnalysis {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+pub struct SignalWithItem {
+    pub signal_id: i64,
+    pub run_id: i64,
+    pub kind: String,
+    pub severity: String,
+    pub confidence: f64,
+    pub reasons_json: Option<String>,
+    pub summary: String,
+    pub item_id: i64,
+    pub section: String,
+    pub stable_key: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub published_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SignalRow {
     pub id: i64,
     pub item_id: i64,
@@ -628,9 +646,53 @@ impl Store {
         Ok(result)
     }
 
+    /// Return signals for a run joined with their item metadata.
+    pub fn signals_with_items_for_run(
+        &self,
+        run_id: i64,
+    ) -> Result<Vec<SignalWithItem>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.id, s.run_id, s.kind, s.severity, s.confidence,
+                        s.reasons_json, s.summary,
+                        i.id, i.section, i.stable_key, i.title, i.url, i.published_at
+                 FROM signals s
+                 JOIN items i ON i.id = s.item_id
+                 WHERE s.run_id = ?1
+                 ORDER BY s.id",
+            )
+            .map_err(|err| format!("failed preparing signals_with_items query: {err}"))?;
+
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                Ok(SignalWithItem {
+                    signal_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    severity: row.get(3)?,
+                    confidence: row.get(4)?,
+                    reasons_json: row.get(5)?,
+                    summary: row.get(6)?,
+                    item_id: row.get(7)?,
+                    section: row.get(8)?,
+                    stable_key: row.get(9)?,
+                    title: row.get(10)?,
+                    url: row.get(11)?,
+                    published_at: row.get(12)?,
+                })
+            })
+            .map_err(|err| format!("failed querying signals_with_items: {err}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|err| format!("failed reading signal_with_item row: {err}"))?);
+        }
+        Ok(result)
+    }
+
     /// Return the id of the most recently started run, or None if no runs exist.
-    /// Used by Phase 8 `report latest`.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used by report_latest; keeps dead_code warning suppressed until Phase 8 wired
     pub fn latest_run_id(&self) -> Result<Option<i64>, String> {
         self.conn
             .query_row(
@@ -1136,6 +1198,70 @@ mod tests {
 
         let sigs = store.signals_for_run(9999).expect("signals_for_run");
         assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn signals_with_items_for_run_joins_correctly() {
+        let root = unique_temp_dir("signals-with-items");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let run_id = store.start_run("proventos", 100).expect("run");
+
+        let (item_id, _) = store
+            .upsert_item(
+                "clubefii",
+                "proventos",
+                Some("https://example.com#proventos"),
+                Some("BRCR11/proventos/2024-06"),
+                "external_id:BRCR11/proventos/2024-06",
+                Some("2024-06"),
+                None,
+                "hashA",
+                r#"[["VALOR","1,50"]]"#,
+                100,
+            )
+            .expect("upsert item");
+
+        store
+            .insert_item_version_on_change(item_id, run_id, "hashA", r#"[["VALOR","1,50"]]"#, 100)
+            .expect("insert version");
+
+        store
+            .insert_signal(
+                item_id,
+                run_id,
+                "dividend",
+                "high",
+                0.9,
+                &["dividend amount revised".to_string()],
+                "dividend changed: external_id:BRCR11/proventos/2024-06",
+                100,
+            )
+            .expect("insert signal");
+
+        let rows = store.signals_with_items_for_run(run_id).expect("query");
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.item_id, item_id);
+        assert_eq!(r.section, "proventos");
+        assert_eq!(r.stable_key, "external_id:BRCR11/proventos/2024-06");
+        assert_eq!(r.severity, "high");
+        assert!((r.confidence - 0.9).abs() < 1e-9);
+        assert_eq!(r.kind, "dividend");
+        assert_eq!(r.url.as_deref(), Some("https://example.com#proventos"));
+    }
+
+    #[test]
+    fn signals_with_items_for_run_empty_for_unknown_run() {
+        let root = unique_temp_dir("signals-with-items-empty");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let rows = store.signals_with_items_for_run(9999).expect("query");
+        assert!(rows.is_empty());
     }
 
     #[test]

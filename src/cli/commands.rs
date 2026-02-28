@@ -5,7 +5,7 @@ use crate::config::{self, DoctorIssueSeverity, OmensConfig};
 use crate::explore::fixtures::FixtureWriter;
 use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
 use crate::runtime::display_manager::DisplayManager;
-use crate::store::{self, LockError, RecipeStatus, RunStatus, Store};
+use crate::store::{self, LockError, RecipeStatus, RunStatus, SignalWithItem, Store};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
@@ -47,11 +47,6 @@ struct CollectStats {
 }
 
 // ── Command implementations ──────────────────────────────────────────────────
-
-pub fn noop(name: &str) -> Result<(), CliError> {
-    println!("{name}: not implemented yet");
-    Ok(())
-}
 
 pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
@@ -1053,6 +1048,231 @@ fn print_config(config: &OmensConfig) {
         "  reports.output_dir: {}",
         config.resolved.reports_output_dir.display()
     );
+}
+
+pub fn report_latest() -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
+    store.migrate().map_err(CliError::fatal)?;
+
+    let run_id = match store.latest_run_id().map_err(CliError::fatal)? {
+        Some(id) => id,
+        None => {
+            println!("report latest: no runs found");
+            println!("  run `omens collect run --tickers TICKER` first");
+            return Ok(());
+        }
+    };
+
+    let all_signals = store
+        .signals_with_items_for_run(run_id)
+        .map_err(CliError::fatal)?;
+
+    let high_impact = loaded.analysis.thresholds.high_impact;
+
+    // Apply display filter: critical/high always; medium only above high_impact; low/ignore hidden
+    let mut filtered: Vec<&SignalWithItem> = all_signals
+        .iter()
+        .filter(|s| match s.severity.as_str() {
+            "critical" | "high" => true,
+            "medium" => s.confidence >= high_impact,
+            _ => false,
+        })
+        .collect();
+
+    // Sort: severity rank desc, confidence desc, published_at desc
+    filtered.sort_by(|a, b| {
+        severity_rank(&b.severity)
+            .cmp(&severity_rank(&a.severity))
+            .then(
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then(
+                b.published_at
+                    .unwrap_or(0)
+                    .cmp(&a.published_at.unwrap_or(0)),
+            )
+    });
+
+    println!("report latest");
+    println!("  run_id: {run_id}");
+    println!("  total_signals: {}", all_signals.len());
+    println!(
+        "  shown: {} (critical/high + medium >= {:.0}% confidence)",
+        filtered.len(),
+        high_impact * 100.0
+    );
+
+    if !filtered.is_empty() {
+        println!();
+        let mut current_severity = String::new();
+        for sig in &filtered {
+            if sig.severity != current_severity {
+                current_severity = sig.severity.clone();
+                println!("--- {} ---", current_severity.to_uppercase());
+            }
+            println!(
+                "  [{:<8} {:.2}] {}",
+                sig.severity.to_uppercase(),
+                sig.confidence,
+                sig.summary
+            );
+            println!("    section: {} | key: {}", sig.section, sig.stable_key);
+            if let Some(url) = &sig.url {
+                println!("    url: {url}");
+            }
+            if let Some(reasons_json) = &sig.reasons_json
+                && let Ok(reasons) = serde_json::from_str::<Vec<String>>(reasons_json)
+                && !reasons.is_empty()
+            {
+                println!("    reasons: {}", reasons.join("; "));
+            }
+        }
+    }
+
+    let generated_at = store::now_epoch_seconds().map_err(CliError::fatal)?;
+
+    // Write reports/latest.json
+    let json_path = loaded.resolved.reports_output_dir.join("latest.json");
+    let json_str = build_report_json(run_id, generated_at, &all_signals, &filtered);
+    std::fs::write(&json_path, &json_str).map_err(|err| {
+        CliError::fatal(format!(
+            "failed writing {}: {err}",
+            json_path.display()
+        ))
+    })?;
+
+    // Write reports/latest.md
+    let md_path = loaded.resolved.reports_output_dir.join("latest.md");
+    let md_str = build_report_md(run_id, generated_at, &all_signals, &filtered);
+    std::fs::write(&md_path, &md_str).map_err(|err| {
+        CliError::fatal(format!(
+            "failed writing {}: {err}",
+            md_path.display()
+        ))
+    })?;
+
+    println!("\n  reports:");
+    println!("    {}", json_path.display());
+    println!("    {}", md_path.display());
+
+    Ok(())
+}
+
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn build_report_json(
+    run_id: i64,
+    generated_at: i64,
+    all_signals: &[SignalWithItem],
+    filtered: &[&SignalWithItem],
+) -> String {
+    let signals_json: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|s| {
+            let reasons: Vec<String> = s
+                .reasons_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default();
+            serde_json::json!({
+                "severity": s.severity,
+                "confidence": s.confidence,
+                "kind": s.kind,
+                "summary": s.summary,
+                "reasons": reasons,
+                "section": s.section,
+                "stable_key": s.stable_key,
+                "title": s.title,
+                "url": s.url,
+                "published_at": s.published_at,
+            })
+        })
+        .collect();
+
+    let report = serde_json::json!({
+        "run_id": run_id,
+        "generated_at": generated_at,
+        "total_signals": all_signals.len(),
+        "shown": filtered.len(),
+        "signals": signals_json,
+    });
+
+    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn build_report_md(
+    run_id: i64,
+    generated_at: i64,
+    all_signals: &[SignalWithItem],
+    filtered: &[&SignalWithItem],
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut md = String::new();
+    let _ = writeln!(md, "# Omens Report — Run #{run_id}");
+    let _ = writeln!(md);
+    let _ = writeln!(md, "Generated at epoch: {generated_at}");
+    let _ = writeln!(md);
+    let _ = writeln!(
+        md,
+        "## Signals ({} shown / {} total)",
+        filtered.len(),
+        all_signals.len()
+    );
+
+    if filtered.is_empty() {
+        let _ = writeln!(md);
+        let _ = writeln!(md, "_No signals to display._");
+        return md;
+    }
+
+    let mut current_severity = String::new();
+    for sig in filtered {
+        if sig.severity != current_severity {
+            current_severity = sig.severity.clone();
+            let _ = writeln!(md);
+            let _ = writeln!(md, "### {}", current_severity.to_uppercase());
+        }
+        let reasons: Vec<String> = sig
+            .reasons_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+
+        let _ = writeln!(
+            md,
+            "- **[{} {:.2}]** {}",
+            sig.severity.to_uppercase(),
+            sig.confidence,
+            sig.summary
+        );
+        let _ = writeln!(
+            md,
+            "  - Section: `{}` | Key: `{}`",
+            sig.section, sig.stable_key
+        );
+        if let Some(url) = &sig.url {
+            let _ = writeln!(md, "  - URL: {url}");
+        }
+        if !reasons.is_empty() {
+            let _ = writeln!(md, "  - Reasons: {}", reasons.join("; "));
+        }
+    }
+
+    md
 }
 
 pub fn map_auth_error(err: AuthError) -> CliError {

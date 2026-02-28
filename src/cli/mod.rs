@@ -50,7 +50,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::ExploreReview => commands::explore_review(),
         Command::ExplorePromote { recipe_id } => commands::explore_promote(recipe_id),
         Command::CollectRun { sections, tickers } => commands::collect_run(sections, tickers),
-        Command::ReportLatest => commands::noop("report latest"),
+        Command::ReportLatest => commands::report_latest(),
         Command::BrowserStatus => commands::browser_status(),
         Command::BrowserInstall { force } => commands::browser_install(force),
         Command::BrowserUpgrade => commands::browser_upgrade(),
