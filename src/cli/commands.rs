@@ -727,6 +727,17 @@ fn do_collect(
                 };
                 println!("    extracted {} rows from {}", rows.len(), table.hint);
 
+                // Detect non-unique first cells so we can build compound keys
+                // for rows that share the same first cell (e.g. comunicados
+                // where "Categoria" = "Fato Relevante" for every row).
+                let first_cell_counts: HashMap<String, usize> =
+                    rows.iter().fold(HashMap::new(), |mut map, cells| {
+                        if let Some(v) = cells.first() {
+                            *map.entry(v.trim().to_string()).or_insert(0) += 1;
+                        }
+                        map
+                    });
+
                 for (row_idx, cells) in rows.iter().enumerate() {
                     let mut fields: HashMap<String, String> = table
                         .headers
@@ -745,10 +756,23 @@ fn do_collect(
                         }
                     }
 
-                    let primary_key = cells
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| row_idx.to_string());
+                    let first = cells.first().map(|s| s.trim()).unwrap_or("");
+                    let primary_key = if first.is_empty() {
+                        row_idx.to_string()
+                    } else if first_cell_counts.get(first).copied().unwrap_or(0) <= 1 {
+                        first.to_string()
+                    } else {
+                        // First cell is not unique in this batch — extend with
+                        // the next non-empty cell to form a stable compound key.
+                        let second: String = cells
+                            .iter()
+                            .skip(1)
+                            .map(|s| s.trim())
+                            .find(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| row_idx.to_string());
+                        format!("{first}|{second}")
+                    };
                     let external_id = format!("{ticker}/{section}/{primary_key}");
                     let stable_key = format!("external_id:{external_id}");
 
@@ -809,12 +833,37 @@ fn do_collect(
                     group.container
                 );
 
+                // Detect non-unique first-field values for compound key building
+                let first_fid_counts: HashMap<String, usize> = {
+                    let first_fid = field_ids.first().copied().unwrap_or("id");
+                    rows.iter().fold(HashMap::new(), |mut map, fields| {
+                        if let Some(v) = fields.get(first_fid) {
+                            *map.entry(v.trim().to_string()).or_insert(0) += 1;
+                        }
+                        map
+                    })
+                };
+
                 for (row_idx, fields) in rows.iter().enumerate() {
                     let first_fid = field_ids.first().copied().unwrap_or("id");
-                    let primary_key = fields
+                    let first_val = fields
                         .get(first_fid)
-                        .cloned()
-                        .unwrap_or_else(|| row_idx.to_string());
+                        .map(|s| s.trim())
+                        .unwrap_or("");
+                    let primary_key = if first_val.is_empty() {
+                        row_idx.to_string()
+                    } else if first_fid_counts.get(first_val).copied().unwrap_or(0) <= 1 {
+                        first_val.to_string()
+                    } else {
+                        let second_fid = field_ids.get(1).copied().unwrap_or("_");
+                        let second: String = fields
+                            .get(second_fid)
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| row_idx.to_string());
+                        format!("{first_val}|{second}")
+                    };
                     let external_id = format!("{ticker}/{section}/{primary_key}");
                     let stable_key = format!("external_id:{external_id}");
 
