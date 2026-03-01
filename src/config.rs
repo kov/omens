@@ -1,86 +1,212 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-#[derive(Debug, Clone)]
+use serde::Deserialize;
+
+mod defaults {
+    pub fn clubefii_base_url() -> String {
+        "https://www.clubefii.com.br".to_string()
+    }
+    pub fn clubefii_login_url() -> String {
+        "https://www.clubefii.com.br/login".to_string()
+    }
+    pub fn browser_mode() -> String {
+        "system".to_string()
+    }
+    pub fn max_pages_per_section() -> u32 {
+        20
+    }
+    pub fn keep_runs_days() -> u32 {
+        180
+    }
+    pub fn keep_versions_per_item() -> u32 {
+        20
+    }
+    pub fn lmstudio_enabled() -> bool {
+        true
+    }
+    pub fn lmstudio_base_url() -> String {
+        "http://127.0.0.1:1234/v1".to_string()
+    }
+    pub fn lmstudio_max_input_chars() -> u32 {
+        12000
+    }
+    pub fn high_impact() -> f64 {
+        0.8
+    }
+    pub fn low_confidence() -> f64 {
+        0.3
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct OmensConfig {
+    #[serde(default)]
     pub clubefii: ClubeFiiConfig,
+    #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(default)]
     pub browser: BrowserConfig,
+    #[serde(default)]
     pub collector: CollectorConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
     pub analysis: AnalysisConfig,
+    #[serde(default)]
     pub reports: ReportsConfig,
+    #[serde(skip)]
     pub resolved: ResolvedPaths,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClubeFiiConfig {
+    #[serde(default = "defaults::clubefii_base_url")]
     pub base_url: String,
+    #[serde(default = "defaults::clubefii_login_url")]
     pub login_url: String,
+    #[serde(default)]
     pub auth_marker: Option<String>,
+    #[serde(default)]
     pub protected_probe_url: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl Default for ClubeFiiConfig {
+    fn default() -> Self {
+        Self {
+            base_url: defaults::clubefii_base_url(),
+            login_url: defaults::clubefii_login_url(),
+            auth_marker: None,
+            protected_probe_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RuntimeConfig {
+    #[serde(default)]
     pub root_dir: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BrowserConfig {
+    #[serde(default = "defaults::browser_mode")]
     pub mode: String,
+    #[serde(default)]
     pub system_binary_path: Option<String>,
+    #[serde(default)]
     pub bundled_build: u64,
+    #[serde(default)]
     pub user_data_dir: Option<String>,
-    pub headless_collect: bool,
 }
 
-#[derive(Debug, Clone)]
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            mode: defaults::browser_mode(),
+            system_binary_path: None,
+            bundled_build: 0,
+            user_data_dir: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CollectorConfig {
-    pub sections: Vec<String>,
+    #[serde(default)]
     pub tickers: Vec<String>,
+    #[serde(default = "defaults::max_pages_per_section")]
     pub max_pages_per_section: u32,
-    pub pagination_mode: String,
-    pub detail_open_policy: String,
 }
 
-#[derive(Debug, Clone)]
+impl Default for CollectorConfig {
+    fn default() -> Self {
+        Self {
+            tickers: Vec::new(),
+            max_pages_per_section: defaults::max_pages_per_section(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct StorageConfig {
+    #[serde(default)]
     pub db_path: Option<String>,
+    #[serde(default)]
     pub lock_path: Option<String>,
+    #[serde(default)]
     pub retention: RetentionConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RetentionConfig {
+    #[serde(default = "defaults::keep_runs_days")]
     pub keep_runs_days: u32,
+    #[serde(default = "defaults::keep_versions_per_item")]
     pub keep_versions_per_item: u32,
 }
 
-#[derive(Debug, Clone)]
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            keep_runs_days: defaults::keep_runs_days(),
+            keep_versions_per_item: defaults::keep_versions_per_item(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AnalysisConfig {
+    #[serde(default)]
     pub lmstudio: LmStudioConfig,
+    #[serde(default)]
     pub thresholds: AnalysisThresholds,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LmStudioConfig {
+    #[serde(default = "defaults::lmstudio_enabled")]
     pub enabled: bool,
+    #[serde(default = "defaults::lmstudio_base_url")]
     pub base_url: String,
+    #[serde(default)]
     pub model: String,
+    #[serde(default = "defaults::lmstudio_max_input_chars")]
     pub max_input_chars: u32,
 }
 
-#[derive(Debug, Clone)]
+impl Default for LmStudioConfig {
+    fn default() -> Self {
+        Self {
+            enabled: defaults::lmstudio_enabled(),
+            base_url: defaults::lmstudio_base_url(),
+            model: String::new(),
+            max_input_chars: defaults::lmstudio_max_input_chars(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AnalysisThresholds {
+    #[serde(default = "defaults::high_impact")]
     pub high_impact: f64,
+    #[serde(default = "defaults::low_confidence")]
     pub low_confidence: f64,
 }
 
-#[derive(Debug, Clone)]
+impl Default for AnalysisThresholds {
+    fn default() -> Self {
+        Self {
+            high_impact: defaults::high_impact(),
+            low_confidence: defaults::low_confidence(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ReportsConfig {
+    #[serde(default)]
     pub output_dir: Option<String>,
 }
 
@@ -111,56 +237,6 @@ pub struct DoctorReport {
     pub issues: Vec<DoctorIssue>,
     pub warning_count: usize,
     pub error_count: usize,
-}
-
-impl Default for OmensConfig {
-    fn default() -> Self {
-        Self {
-            clubefii: ClubeFiiConfig {
-                base_url: "https://www.clubefii.com.br".to_string(),
-                login_url: "https://www.clubefii.com.br/login".to_string(),
-                auth_marker: None,
-                protected_probe_url: None,
-            },
-            runtime: RuntimeConfig { root_dir: None },
-            browser: BrowserConfig {
-                mode: "system".to_string(),
-                system_binary_path: None,
-                bundled_build: 0,
-                user_data_dir: None,
-                headless_collect: true,
-            },
-            collector: CollectorConfig {
-                sections: vec!["news".to_string(), "material-facts".to_string()],
-                tickers: Vec::new(),
-                max_pages_per_section: 20,
-                pagination_mode: "next_link".to_string(),
-                detail_open_policy: "when_listing_incomplete".to_string(),
-            },
-            storage: StorageConfig {
-                db_path: None,
-                lock_path: None,
-                retention: RetentionConfig {
-                    keep_runs_days: 180,
-                    keep_versions_per_item: 20,
-                },
-            },
-            analysis: AnalysisConfig {
-                lmstudio: LmStudioConfig {
-                    enabled: true,
-                    base_url: "http://127.0.0.1:1234/v1".to_string(),
-                    model: "".to_string(),
-                    max_input_chars: 12000,
-                },
-                thresholds: AnalysisThresholds {
-                    high_impact: 0.8,
-                    low_confidence: 0.3,
-                },
-            },
-            reports: ReportsConfig { output_dir: None },
-            resolved: ResolvedPaths::default(),
-        }
-    }
 }
 
 pub fn load_default_config() -> Result<OmensConfig, String> {
@@ -217,103 +293,8 @@ pub fn bootstrap_layout(config: &OmensConfig) -> Result<(), String> {
 fn parse_config_file(path: &Path) -> Result<OmensConfig, String> {
     let text = fs::read_to_string(path)
         .map_err(|e| format!("failed to read config file {}: {e}", path.display()))?;
-
-    let entries = parse_entries(&text)?;
-    let mut config = OmensConfig::default();
-
-    if let Some(value) = entries.get("clubefii.base_url") {
-        config.clubefii.base_url = expect_string("clubefii.base_url", value)?;
-    }
-    if let Some(value) = entries.get("clubefii.login_url") {
-        config.clubefii.login_url = expect_string("clubefii.login_url", value)?;
-    }
-    if let Some(value) = entries.get("clubefii.auth_marker") {
-        config.clubefii.auth_marker = Some(expect_string("clubefii.auth_marker", value)?);
-    }
-    if let Some(value) = entries.get("clubefii.protected_probe_url") {
-        config.clubefii.protected_probe_url =
-            Some(expect_string("clubefii.protected_probe_url", value)?);
-    }
-
-    if let Some(value) = entries.get("runtime.root_dir") {
-        config.runtime.root_dir = Some(expect_string("runtime.root_dir", value)?);
-    }
-
-    if let Some(value) = entries.get("browser.mode") {
-        config.browser.mode = expect_string("browser.mode", value)?;
-    }
-    if let Some(value) = entries.get("browser.system_binary_path") {
-        config.browser.system_binary_path =
-            Some(expect_string("browser.system_binary_path", value)?);
-    }
-    if let Some(value) = entries.get("browser.bundled_build") {
-        config.browser.bundled_build = expect_u64("browser.bundled_build", value)?;
-    }
-    if let Some(value) = entries.get("browser.user_data_dir") {
-        config.browser.user_data_dir = Some(expect_string("browser.user_data_dir", value)?);
-    }
-    if let Some(value) = entries.get("browser.headless_collect") {
-        config.browser.headless_collect = expect_bool("browser.headless_collect", value)?;
-    }
-
-    if let Some(value) = entries.get("collector.sections") {
-        config.collector.sections = expect_string_array("collector.sections", value)?;
-    }
-    if let Some(value) = entries.get("collector.tickers") {
-        config.collector.tickers = expect_string_array("collector.tickers", value)?;
-    }
-    if let Some(value) = entries.get("collector.max_pages_per_section") {
-        config.collector.max_pages_per_section =
-            expect_u32("collector.max_pages_per_section", value)?;
-    }
-    if let Some(value) = entries.get("collector.pagination_mode") {
-        config.collector.pagination_mode = expect_string("collector.pagination_mode", value)?;
-    }
-    if let Some(value) = entries.get("collector.detail_open_policy") {
-        config.collector.detail_open_policy = expect_string("collector.detail_open_policy", value)?;
-    }
-
-    if let Some(value) = entries.get("storage.db_path") {
-        config.storage.db_path = Some(expect_string("storage.db_path", value)?);
-    }
-    if let Some(value) = entries.get("storage.lock_path") {
-        config.storage.lock_path = Some(expect_string("storage.lock_path", value)?);
-    }
-    if let Some(value) = entries.get("storage.retention.keep_runs_days") {
-        config.storage.retention.keep_runs_days =
-            expect_u32("storage.retention.keep_runs_days", value)?;
-    }
-    if let Some(value) = entries.get("storage.retention.keep_versions_per_item") {
-        config.storage.retention.keep_versions_per_item =
-            expect_u32("storage.retention.keep_versions_per_item", value)?;
-    }
-
-    if let Some(value) = entries.get("analysis.lmstudio.enabled") {
-        config.analysis.lmstudio.enabled = expect_bool("analysis.lmstudio.enabled", value)?;
-    }
-    if let Some(value) = entries.get("analysis.lmstudio.base_url") {
-        config.analysis.lmstudio.base_url = expect_string("analysis.lmstudio.base_url", value)?;
-    }
-    if let Some(value) = entries.get("analysis.lmstudio.model") {
-        config.analysis.lmstudio.model = expect_string("analysis.lmstudio.model", value)?;
-    }
-    if let Some(value) = entries.get("analysis.lmstudio.max_input_chars") {
-        config.analysis.lmstudio.max_input_chars =
-            expect_u32("analysis.lmstudio.max_input_chars", value)?;
-    }
-    if let Some(value) = entries.get("analysis.thresholds.high_impact") {
-        config.analysis.thresholds.high_impact =
-            expect_f64("analysis.thresholds.high_impact", value)?;
-    }
-    if let Some(value) = entries.get("analysis.thresholds.low_confidence") {
-        config.analysis.thresholds.low_confidence =
-            expect_f64("analysis.thresholds.low_confidence", value)?;
-    }
-
-    if let Some(value) = entries.get("reports.output_dir") {
-        config.reports.output_dir = Some(expect_string("reports.output_dir", value)?);
-    }
-
+    let config: OmensConfig = toml::from_str(&text)
+        .map_err(|e| format!("config parse error: {e}"))?;
     validate_semantics(&config)?;
     Ok(config)
 }
@@ -327,10 +308,6 @@ fn validate_semantics(config: &OmensConfig) -> Result<(), String> {
                 config.browser.mode
             ));
         }
-    }
-
-    if config.collector.sections.is_empty() {
-        return Err("collector.sections must not be empty".to_string());
     }
 
     if config.collector.max_pages_per_section == 0 {
@@ -495,175 +472,6 @@ fn push_issue(report: &mut DoctorReport, severity: DoctorIssueSeverity, message:
     report.issues.push(DoctorIssue { severity, message });
 }
 
-fn parse_entries(text: &str) -> Result<HashMap<String, TomlValue>, String> {
-    let mut section = String::new();
-    let mut entries = HashMap::<String, TomlValue>::new();
-
-    for (index, raw_line) in text.lines().enumerate() {
-        let line_number = index + 1;
-        let line = strip_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line[1..line.len() - 1].trim().to_string();
-            continue;
-        }
-
-        let (key, value) = parse_key_value(line)
-            .map_err(|e| format!("config parse error at line {line_number}: {e}"))?;
-
-        let full_key = if section.is_empty() {
-            key
-        } else {
-            format!("{section}.{key}")
-        };
-
-        entries.insert(full_key, value);
-    }
-
-    Ok(entries)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum TomlValue {
-    String(String),
-    Bool(bool),
-    Integer(u64),
-    Float(f64),
-    ArrayString(Vec<String>),
-}
-
-fn parse_key_value(line: &str) -> Result<(String, TomlValue), String> {
-    let parts: Vec<&str> = line.splitn(2, '=').collect();
-    if parts.len() != 2 {
-        return Err("expected `key = value`".to_string());
-    }
-
-    let key = parts[0].trim();
-    if key.is_empty() {
-        return Err("missing key".to_string());
-    }
-
-    let value = parts[1].trim();
-    let parsed = parse_value(value)?;
-
-    Ok((key.to_string(), parsed))
-}
-
-fn parse_value(value: &str) -> Result<TomlValue, String> {
-    if value.starts_with('"') {
-        return Ok(TomlValue::String(parse_toml_string(value)?));
-    }
-
-    if value == "true" {
-        return Ok(TomlValue::Bool(true));
-    }
-
-    if value == "false" {
-        return Ok(TomlValue::Bool(false));
-    }
-
-    if value.starts_with('[') {
-        return Ok(TomlValue::ArrayString(parse_string_array(value)?));
-    }
-
-    if value.contains('.') {
-        let parsed = value
-            .parse::<f64>()
-            .map_err(|_| format!("invalid float literal: {value}"))?;
-        return Ok(TomlValue::Float(parsed));
-    }
-
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|_| format!("unsupported literal `{value}`"))?;
-    Ok(TomlValue::Integer(parsed))
-}
-
-fn parse_toml_string(value: &str) -> Result<String, String> {
-    if !value.starts_with('"') || !value.ends_with('"') || value.len() < 2 {
-        return Err("expected quoted string".to_string());
-    }
-
-    let inner = &value[1..value.len() - 1];
-    if inner.contains('"') {
-        return Err("embedded quote is not supported in phase 1 parser".to_string());
-    }
-
-    Ok(inner.to_string())
-}
-
-fn parse_string_array(value: &str) -> Result<Vec<String>, String> {
-    if !value.starts_with('[') || !value.ends_with(']') {
-        return Err("array must start with `[` and end with `]`".to_string());
-    }
-
-    let inner = value[1..value.len() - 1].trim();
-    if inner.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    inner
-        .split(',')
-        .map(|entry| parse_toml_string(entry.trim()))
-        .collect()
-}
-
-fn expect_string(key: &str, value: &TomlValue) -> Result<String, String> {
-    match value {
-        TomlValue::String(v) => Ok(v.clone()),
-        _ => Err(format!("{key} must be a string")),
-    }
-}
-
-fn expect_bool(key: &str, value: &TomlValue) -> Result<bool, String> {
-    match value {
-        TomlValue::Bool(v) => Ok(*v),
-        _ => Err(format!("{key} must be a boolean")),
-    }
-}
-
-fn expect_u64(key: &str, value: &TomlValue) -> Result<u64, String> {
-    match value {
-        TomlValue::Integer(v) => Ok(*v),
-        _ => Err(format!("{key} must be an integer")),
-    }
-}
-
-fn expect_u32(key: &str, value: &TomlValue) -> Result<u32, String> {
-    let parsed = expect_u64(key, value)?;
-    u32::try_from(parsed).map_err(|_| format!("{key} is out of range for u32"))
-}
-
-fn expect_f64(key: &str, value: &TomlValue) -> Result<f64, String> {
-    match value {
-        TomlValue::Float(v) => Ok(*v),
-        TomlValue::Integer(v) => Ok(*v as f64),
-        _ => Err(format!("{key} must be numeric")),
-    }
-}
-
-fn expect_string_array(key: &str, value: &TomlValue) -> Result<Vec<String>, String> {
-    match value {
-        TomlValue::ArrayString(v) => Ok(v.clone()),
-        _ => Err(format!("{key} must be an array of strings")),
-    }
-}
-
-fn strip_comment(raw_line: &str) -> &str {
-    let mut in_string = false;
-    for (i, ch) in raw_line.char_indices() {
-        match ch {
-            '"' => in_string = !in_string,
-            '#' if !in_string => return &raw_line[..i],
-            _ => {}
-        }
-    }
-    raw_line
-}
-
 fn resolve_paths(config_file: PathBuf, config: &OmensConfig) -> Result<ResolvedPaths, String> {
     let home = home_dir()?;
 
@@ -752,8 +560,8 @@ mod tests {
             &path,
             "[clubefii]\nauth_marker = \"dashboard\"\nprotected_probe_url = \"https://probe.local\"\n\
              [runtime]\nroot_dir = \"~/custom\"\n\
-             [browser]\nheadless_collect = false\nbundled_build = 123\n\
-             [collector]\nsections = [\"news\",\"material-facts\"]\nmax_pages_per_section = 9\n\
+             [browser]\nbundled_build = 123\n\
+             [collector]\nmax_pages_per_section = 9\n\
              [analysis.thresholds]\nhigh_impact = 0.9\n",
         )
         .expect("should write config file");
@@ -765,12 +573,7 @@ mod tests {
             config.clubefii.protected_probe_url.as_deref(),
             Some("https://probe.local")
         );
-        assert!(!config.browser.headless_collect);
         assert_eq!(config.browser.bundled_build, 123);
-        assert_eq!(
-            config.collector.sections,
-            vec!["news".to_string(), "material-facts".to_string()]
-        );
         assert_eq!(config.collector.max_pages_per_section, 9);
         assert_eq!(config.analysis.thresholds.high_impact, 0.9);
 
@@ -792,11 +595,11 @@ mod tests {
     #[test]
     fn invalid_type_errors() {
         let path = unique_temp_file("invalid");
-        fs::write(&path, "[browser]\nheadless_collect = \"yes\"\n")
+        fs::write(&path, "[analysis.lmstudio]\nenabled = \"yes\"\n")
             .expect("should write invalid config");
 
         let err = parse_config_file(&path).expect_err("parsing should fail");
-        assert!(err.contains("browser.headless_collect must be a boolean"));
+        assert!(err.contains("config parse error"));
 
         let _ = fs::remove_file(path);
     }
@@ -804,11 +607,11 @@ mod tests {
     #[test]
     fn invalid_array_item_errors() {
         let path = unique_temp_file("invalid-array");
-        fs::write(&path, "[collector]\nsections = [\"news\", 7]\n")
+        fs::write(&path, "[collector]\ntickers = [\"BRCR11\", 7]\n")
             .expect("should write invalid array config");
 
         let err = parse_config_file(&path).expect_err("parsing should fail");
-        assert!(err.contains("expected quoted string"));
+        assert!(err.contains("config parse error"));
 
         let _ = fs::remove_file(path);
     }
@@ -825,16 +628,17 @@ mod tests {
     }
 
     #[test]
-    fn custom_section_name_is_valid() {
-        let path = unique_temp_file("custom-section");
+    fn parse_multiline_tickers() {
+        let path = unique_temp_file("multiline");
         fs::write(
             &path,
-            "[collector]\nsections = [\"news\", \"proventos\", \"comunicados\"]\n",
+            "[collector]\ntickers = [\n  \"ALZC11\",\n  \"BRCR11\",\n  \"VISC11\",\n]\n",
         )
-        .expect("should write config");
+        .expect("should write config file");
 
-        let config = parse_config_file(&path).expect("custom section names should be valid");
-        assert_eq!(config.collector.sections.len(), 3);
+        let config = parse_config_file(&path).expect("multiline tickers should parse");
+        assert_eq!(config.collector.tickers.len(), 3);
+        assert_eq!(config.collector.tickers[0], "ALZC11");
 
         let _ = fs::remove_file(path);
     }
