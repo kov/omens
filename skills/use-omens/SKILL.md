@@ -107,9 +107,17 @@ mode = "bundled"       # or "system"
 
 ## Pipeline
 
-### Step 1 — Explore (one-time per ticker)
+### Step 1 — Explore (one-time setup, NOT per-ticker)
 
-Discover the tab/section structure of a FII page and capture extraction recipes:
+**Recipes are per-section, not per-ticker.** All clubefii.com.br FII pages share
+the same HTML structure, so a single explore run against any ticker creates recipes
+that work for every ticker in your config. **BRCR11 is the recommended reference
+ticker** — it has all four main sections well-populated.
+
+You only need to re-run explore if:
+- The database was wiped (`omens.db` deleted)
+- The site's HTML structure changed and collect starts returning 0 items
+- You want to improve recipe quality for a specific section
 
 ```bash
 cargo run -- explore start BRCR11
@@ -117,23 +125,31 @@ cargo run -- explore start BRCR11
 cargo run -- explore start https://www.clubefii.com.br/fiis/BRCR11
 ```
 
-This opens Chromium, crawls each tab, discovers tables and repeating-group
-fields, and saves candidate recipes to the DB.
+This opens Chromium, crawls all 25 tabs, discovers tables and repeating-group
+fields, and saves one candidate recipe per section to the DB.
 
-Review candidates:
+Review candidates (one row per section, all confidence=1.00 when auto-detected):
 
 ```bash
 cargo run -- explore review
-# id=1   section=comunicados         status=candidate        confidence=0.95  name=...
-# id=2   section=proventos           status=candidate        confidence=0.88  name=...
+# id=1   section=informacoes_basicas  status=pending_review  confidence=1.00  name=...
+# id=3   section=cotacoes             status=pending_review  confidence=1.00  name=...
+# id=8   section=comunicados          status=pending_review  confidence=1.00  name=...
+# id=10  section=proventos            status=pending_review  confidence=1.00  name=...
+# ... (25 sections total, only 4 are used for scoring)
 ```
 
-Promote the best recipe for each section:
+Promote only the 4 sections used for collection and scoring:
 
 ```bash
-cargo run -- explore promote 1
-cargo run -- explore promote 2
+cargo run -- explore promote <id_for_informacoes_basicas>
+cargo run -- explore promote <id_for_comunicados>
+cargo run -- explore promote <id_for_proventos>
+cargo run -- explore promote <id_for_cotacoes>
 ```
+
+After promoting these 4, all 51 configured tickers will collect successfully.
+The other 21 sections (videos, comparativo, etc.) can be ignored.
 
 Only one recipe per section is `active` at a time. Promoting a new one
 automatically demotes the previous.
@@ -295,7 +311,7 @@ Aviso ao Mercado|2                          ← first_cell|row_index (last resor
 
 ---
 
-## Typical Full Run (new ticker)
+## Typical Full Run (fresh database or new machine)
 
 ```bash
 # 1. Start display (if not running)
@@ -309,25 +325,28 @@ cargo run -- browser install
 # 3. Auth (user logs in interactively)
 cargo run -- auth bootstrap
 
-# 4. Explore the ticker
+# 4. Explore BRCR11 (creates recipes for ALL tickers — only needed once)
 cargo run -- explore start BRCR11
 
-# 5. Review and promote recipes
+# 5. Review candidates and promote the 4 scoring sections
 cargo run -- explore review
+# Note the IDs for: informacoes_basicas, comunicados, proventos, cotacoes
+cargo run -- explore promote <id_for_informacoes_basicas>
 cargo run -- explore promote <id_for_comunicados>
 cargo run -- explore promote <id_for_proventos>
 cargo run -- explore promote <id_for_cotacoes>
-cargo run -- explore promote <id_for_informacoes_basicas>
 
-# 6. Collect data
-cargo run -- collect run --tickers BRCR11
+# 6. Full pipeline run across all configured tickers
+cargo run -- run
 
-# 7. Report
-cargo run -- report latest
-
-# 8. Stability check (re-run; should show items_new=0, items_changed=0)
-cargo run -- collect run --tickers BRCR11
+# 7. Filter to recent signals (last 30 days)
+cargo run -- report latest --since 30d
 ```
+
+## Adding a new ticker
+
+Just add the ticker to `collector.tickers` in `~/.omens/config/omens.toml`.
+No explore needed — existing recipes cover all clubefii.com.br tickers.
 
 ---
 
