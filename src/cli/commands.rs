@@ -972,9 +972,10 @@ fn do_collect(
     Ok(stats)
 }
 
-/// Parse Brazilian date "DD/MM/YYYY" → Unix epoch seconds (UTC midnight).
+/// Parse Brazilian date "DD/MM/YYYY" (or "DD/MM/YYYY HH:MM:SS") → Unix epoch seconds (UTC midnight).
 fn parse_date_br(s: &str) -> Option<i64> {
-    let s = s.trim();
+    // Strip optional time suffix (e.g. "27/02/2026 23:41:00" → "27/02/2026")
+    let s = s.split_whitespace().next()?;
     let mut parts = s.splitn(3, '/');
     let d: i64 = parts.next()?.trim().parse().ok()?;
     let m: i64 = parts.next()?.trim().parse().ok()?;
@@ -995,8 +996,23 @@ fn parse_date_br(s: &str) -> Option<i64> {
 fn extract_published_at(section: &str, normalized_json: &str) -> Option<i64> {
     let pairs: Vec<[String; 2]> = serde_json::from_str(normalized_json).ok()?;
     let date_keys: &[&str] = match section {
-        "comunicados" | "proventos" => &["Data Referência", "Data Referencia", "Data Entrega"],
-        "informacoes_basicas" => &["DATA COM", "MÊS REF.", "MES REF."],
+        "comunicados" => &[
+            "Data Referência",
+            "Data Referencia",
+            "Data Entrega",
+            "data referência",
+            "data referencia",
+            "data entrega",
+        ],
+        "proventos" => &["DATA BASE", "DATA PAGAMENTO", "Data Referência", "Data Referencia"],
+        "informacoes_basicas" => &[
+            "data referência",
+            "data referencia",
+            "data entrega",
+            "DATA COM",
+            "MÊS REF.",
+            "MES REF.",
+        ],
         _ => return None,
     };
     for [key, val] in &pairs {
@@ -1481,6 +1497,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_date_br_with_timestamp() {
+        // Dates like "29/12/2025 10:00:00" should strip the time and parse fine
+        assert_eq!(parse_date_br("29/12/2025 10:00:00"), parse_date_br("29/12/2025"));
+    }
+
+    #[test]
     fn parse_date_br_invalid() {
         assert_eq!(parse_date_br("not-a-date"), None);
         assert_eq!(parse_date_br("32/01/2023"), None);
@@ -1496,7 +1518,7 @@ mod tests {
 
     #[test]
     fn extract_date_proventos() {
-        let json = r#"[["Data Entrega","31/08/2023"],["Valor","R$1.00"]]"#;
+        let json = r#"[["DATA BASE","31/08/2023"],["VALOR","R$1.00"]]"#;
         assert_eq!(extract_published_at("proventos", json), Some(AUG31_2023));
     }
 
