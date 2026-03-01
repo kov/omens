@@ -49,9 +49,9 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::ExploreStart { url } => commands::explore_start(url),
         Command::ExploreReview => commands::explore_review(),
         Command::ExplorePromote { recipe_id } => commands::explore_promote(recipe_id),
-        Command::Run => commands::run_all(),
+        Command::Run { since } => commands::run_all(since),
         Command::CollectRun { sections, tickers } => commands::collect_run(sections, tickers),
-        Command::ReportLatest => commands::report_latest(),
+        Command::ReportLatest { since } => commands::report_latest(since),
         Command::BrowserStatus => commands::browser_status(),
         Command::BrowserInstall { force } => commands::browser_install(force),
         Command::BrowserUpgrade => commands::browser_upgrade(),
@@ -73,13 +73,13 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Root => {
             println!(
                 "Usage:\n  \
-  omens run\n  \
+  omens run [--since DATE|Nd]\n  \
   omens auth bootstrap [--ephemeral] [--display]\n  \
   omens explore start <url-or-ticker>\n  \
   omens explore review\n  \
   omens explore promote <recipe_id>\n  \
   omens collect run [--sections csv] [--tickers csv]\n  \
-  omens report latest\n  \
+  omens report latest [--since DATE|Nd]\n  \
   omens config doctor\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
   omens display start|stop|status"
@@ -94,7 +94,7 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Collect => {
             println!("Usage:\n  omens collect run [--sections csv] [--tickers csv]")
         }
-        HelpTopic::Report => println!("Usage:\n  omens report latest"),
+        HelpTopic::Report => println!("Usage:\n  omens report latest [--since DATE|Nd]"),
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
         HelpTopic::Browser => {
             println!(
@@ -120,7 +120,9 @@ enum HelpTopic {
 }
 
 enum Command {
-    Run,
+    Run {
+        since: Option<i64>,
+    },
     AuthBootstrap {
         ephemeral: bool,
         display: bool,
@@ -136,7 +138,9 @@ enum Command {
         sections: Option<String>,
         tickers: Option<String>,
     },
-    ReportLatest,
+    ReportLatest {
+        since: Option<i64>,
+    },
     ConfigDoctor,
     BrowserStatus,
     BrowserInstall {
@@ -177,11 +181,20 @@ impl Command {
 
         match args[1].as_str() {
             "run" => {
-                if args.len() == 2 {
-                    Ok(Command::Run)
-                } else {
-                    Err("usage: omens run".to_string())
+                let mut since = None::<i64>;
+                let mut i = 2usize;
+                while i < args.len() {
+                    if args[i] == "--since" {
+                        let val = args
+                            .get(i + 1)
+                            .ok_or_else(|| "missing value after --since".to_string())?;
+                        since = Some(commands::parse_since(val)?);
+                        i += 2;
+                    } else {
+                        return Err("usage: omens run [--since DATE|Nd]".to_string());
+                    }
                 }
+                Ok(Command::Run { since })
             }
             "auth" => parse_auth(args),
             "explore" => parse_explore(args),
@@ -304,15 +317,28 @@ fn parse_collect(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_report(args: &[String]) -> Result<Command, String> {
-    if args.len() == 3 && args[2] == "latest" {
-        return Ok(Command::ReportLatest);
+    if args.len() >= 3 && args[2] == "latest" {
+        let mut since = None::<i64>;
+        let mut i = 3usize;
+        while i < args.len() {
+            if args[i] == "--since" {
+                let val = args
+                    .get(i + 1)
+                    .ok_or_else(|| "missing value after --since".to_string())?;
+                since = Some(commands::parse_since(val)?);
+                i += 2;
+            } else {
+                return Err("usage: omens report latest [--since DATE|Nd]".to_string());
+            }
+        }
+        return Ok(Command::ReportLatest { since });
     }
     if args.len() == 3 && is_help(args[2].as_str()) {
         return Ok(Command::Help {
             topic: HelpTopic::Report,
         });
     }
-    Err("usage: omens report latest".to_string())
+    Err("usage: omens report latest [--since DATE|Nd]".to_string())
 }
 
 fn parse_config(args: &[String]) -> Result<Command, String> {
@@ -413,8 +439,49 @@ mod tests {
     fn parse_run_command() {
         assert!(matches!(
             Command::parse(&to_args(&["omens", "run"])).expect("should parse"),
-            Command::Run
+            Command::Run { since: None }
         ));
+    }
+
+    #[test]
+    fn parse_run_since_flag() {
+        let cmd = Command::parse(&to_args(&["omens", "run", "--since", "2023-08-31"]))
+            .expect("run --since should parse");
+        match cmd {
+            Command::Run { since: Some(ts) } => assert_eq!(ts, 1693440000),
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn parse_report_latest_no_since() {
+        assert!(matches!(
+            Command::parse(&to_args(&["omens", "report", "latest"])).expect("should parse"),
+            Command::ReportLatest { since: None }
+        ));
+    }
+
+    #[test]
+    fn parse_report_since_iso() {
+        let cmd = Command::parse(&to_args(&[
+            "omens",
+            "report",
+            "latest",
+            "--since",
+            "2023-08-31",
+        ]))
+        .expect("report latest --since should parse");
+        match cmd {
+            Command::ReportLatest { since: Some(ts) } => assert_eq!(ts, 1693440000),
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn parse_report_since_missing_value_errors() {
+        let result =
+            Command::parse(&to_args(&["omens", "report", "latest", "--since"]));
+        assert!(result.is_err());
     }
 
     #[test]

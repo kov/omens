@@ -478,6 +478,7 @@ impl Store {
         content_hash: &str,
         normalized_json: &str,
         now_epoch: i64,
+        published_at: Option<i64>,
     ) -> Result<(i64, bool), String> {
         let existing: Option<i64> = self
             .conn
@@ -492,24 +493,55 @@ impl Store {
         if let Some(id) = existing {
             self.conn
                 .execute(
-                    "UPDATE items SET last_seen_at = ?1, content_hash = ?2, normalized_json = ?3, raw_hash = ?4 WHERE id = ?5",
-                    params![now_epoch, content_hash, normalized_json, raw_hash, id],
+                    "UPDATE items SET last_seen_at = ?1, content_hash = ?2, normalized_json = ?3, \
+                     raw_hash = ?4, published_at = COALESCE(published_at, ?5) WHERE id = ?6",
+                    params![now_epoch, content_hash, normalized_json, raw_hash, published_at, id],
                 )
                 .map_err(|err| format!("failed updating item {id}: {err}"))?;
             Ok((id, false))
         } else {
             self.conn
                 .execute(
-                    "INSERT INTO items(source, section, url, external_id, stable_key, title, raw_hash, content_hash, normalized_json, first_seen_at, last_seen_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                    "INSERT INTO items(source, section, url, external_id, stable_key, title, \
+                     raw_hash, content_hash, normalized_json, first_seen_at, last_seen_at, published_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
                     params![
                         source, section, url, external_id, stable_key,
-                        title, raw_hash, content_hash, normalized_json, now_epoch
+                        title, raw_hash, content_hash, normalized_json, now_epoch, published_at
                     ],
                 )
                 .map_err(|err| format!("failed inserting item {stable_key}: {err}"))?;
             Ok((self.conn.last_insert_rowid(), true))
         }
+    }
+
+    /// Return (id, section, normalized_json) for all items where published_at is NULL.
+    /// Used by the backfill loop in collect_run on first run after this feature landed.
+    pub fn items_missing_published_at(&self) -> Result<Vec<(i64, String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, section, normalized_json FROM items \
+                 WHERE published_at IS NULL AND normalized_json IS NOT NULL",
+            )
+            .map_err(|err| format!("prepare items_missing_published_at: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|err| format!("query items_missing_published_at: {err}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("collect items_missing_published_at: {err}"))?;
+        Ok(rows)
+    }
+
+    /// Set published_at for a single item (used by backfill and tests).
+    pub fn set_published_at(&self, item_id: i64, ts: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE items SET published_at = ?1 WHERE id = ?2",
+                params![ts, item_id],
+            )
+            .map_err(|err| format!("set_published_at {item_id}: {err}"))?;
+        Ok(())
     }
 
     /// Insert an item_version if this content_hash is new for this item. Returns true if inserted.
@@ -1032,6 +1064,7 @@ mod tests {
                 "deadbeef00000001",
                 r#"[["mes","2024-01"],["valor","R$1.00"]]"#,
                 1000,
+                None,
             )
             .expect("upsert should succeed");
         assert!(id1 > 0);
@@ -1050,10 +1083,73 @@ mod tests {
                 "deadbeef00000002",
                 r#"[["mes","2024-01"],["valor","R$1.05"]]"#,
                 2000,
+                None,
             )
             .expect("second upsert should succeed");
         assert_eq!(id1, id2);
         assert!(!is_new2);
+    }
+
+    #[test]
+    fn upsert_item_stores_published_at_and_coalesces() {
+        let root = unique_temp_dir("published-at");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        // Insert with a known published_at
+        let (id, _) = store
+            .upsert_item(
+                "clubefii",
+                "proventos",
+                None,
+                None,
+                "key:pub-at-test",
+                None,
+                None,
+                "h1",
+                "{}",
+                1000,
+                Some(1693440000),
+            )
+            .expect("insert");
+
+        let ts: Option<i64> = store
+            .conn
+            .query_row(
+                "SELECT published_at FROM items WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(ts, Some(1693440000));
+
+        // Update with published_at=None → COALESCE keeps original value
+        store
+            .upsert_item(
+                "clubefii",
+                "proventos",
+                None,
+                None,
+                "key:pub-at-test",
+                None,
+                None,
+                "h2",
+                "{}",
+                2000,
+                None,
+            )
+            .expect("update");
+
+        let ts2: Option<i64> = store
+            .conn
+            .query_row(
+                "SELECT published_at FROM items WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("query after update");
+        assert_eq!(ts2, Some(1693440000), "COALESCE should preserve existing date");
     }
 
     #[test]
@@ -1076,6 +1172,7 @@ mod tests {
                 "hash1",
                 "{}",
                 100,
+                None,
             )
             .expect("upsert");
 
@@ -1131,7 +1228,7 @@ mod tests {
         let run2 = store.start_run("proventos", 200).expect("run2");
 
         let (item_id, _) = store
-            .upsert_item("clubefii", "proventos", None, None, "key:A", None, None, "h1", "{}", 100)
+            .upsert_item("clubefii", "proventos", None, None, "key:A", None, None, "h1", "{}", 100, None)
             .expect("upsert item");
 
         // Insert first version in run1
@@ -1221,6 +1318,7 @@ mod tests {
                 "hashA",
                 r#"[["VALOR","1,50"]]"#,
                 100,
+                None,
             )
             .expect("upsert item");
 

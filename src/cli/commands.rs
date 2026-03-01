@@ -476,6 +476,20 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
     let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
     store.migrate().map_err(CliError::fatal)?;
 
+    // Backfill published_at for rows scraped before this feature existed.
+    // One-time pass; subsequent runs find no NULL rows and skip immediately.
+    let missing = store
+        .items_missing_published_at()
+        .map_err(CliError::fatal)?;
+    if !missing.is_empty() {
+        for (item_id, section, json) in &missing {
+            if let Some(ts) = extract_published_at(section, json) {
+                store.set_published_at(*item_id, ts).map_err(CliError::fatal)?;
+            }
+        }
+        println!("  backfilled published_at for {} items", missing.len());
+    }
+
     let sections_csv = format!(
         "tickers={} sections={}",
         ticker_list.join(","),
@@ -825,6 +839,7 @@ fn do_collect(
 
                     let normalized_json = build_normalized_json(&fields);
                     let hash = store::content_hash_fnv(&normalized_json);
+                    let published_at = extract_published_at(section, &normalized_json);
 
                     let (item_id, is_new) = store.upsert_item(
                         "clubefii",
@@ -837,6 +852,7 @@ fn do_collect(
                         &hash,
                         &normalized_json,
                         now,
+                        published_at,
                     )?;
                     let is_changed = store.insert_item_version_on_change(
                         item_id,
@@ -916,6 +932,7 @@ fn do_collect(
 
                     let normalized_json = build_normalized_json(fields);
                     let hash = store::content_hash_fnv(&normalized_json);
+                    let published_at = extract_published_at(section, &normalized_json);
 
                     let (item_id, is_new) = store.upsert_item(
                         "clubefii",
@@ -928,6 +945,7 @@ fn do_collect(
                         &hash,
                         &normalized_json,
                         now,
+                        published_at,
                     )?;
                     let is_changed = store.insert_item_version_on_change(
                         item_id,
@@ -954,6 +972,59 @@ fn do_collect(
     Ok(stats)
 }
 
+/// Parse Brazilian date "DD/MM/YYYY" → Unix epoch seconds (UTC midnight).
+fn parse_date_br(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let mut parts = s.splitn(3, '/');
+    let d: i64 = parts.next()?.trim().parse().ok()?;
+    let m: i64 = parts.next()?.trim().parse().ok()?;
+    let y: i64 = parts.next()?.trim().parse().ok()?;
+    if !(1..=31).contains(&d) || !(1..=12).contains(&m) || !(1970..=2100).contains(&y) {
+        return None;
+    }
+    // Gregorian calendar → Julian Day Number (proleptic, includes century corrections)
+    let a = (14 - m) / 12;
+    let yy = y + 4800 - a;
+    let mm = m + 12 * a - 3;
+    let jdn = d + (153 * mm + 2) / 5 + 365 * yy + yy / 4 - yy / 100 + yy / 400 - 32045;
+    Some((jdn - 2_440_588) * 86_400)
+}
+
+/// Extract the best publication date from a normalized_json payload.
+/// Returns None for `cotacoes` (historical price data, lower priority).
+fn extract_published_at(section: &str, normalized_json: &str) -> Option<i64> {
+    let pairs: Vec<[String; 2]> = serde_json::from_str(normalized_json).ok()?;
+    let date_keys: &[&str] = match section {
+        "comunicados" | "proventos" => &["Data Referência", "Data Referencia", "Data Entrega"],
+        "informacoes_basicas" => &["DATA COM", "MÊS REF.", "MES REF."],
+        _ => return None,
+    };
+    for [key, val] in &pairs {
+        if date_keys.contains(&key.as_str()) && let Some(epoch) = parse_date_br(val) {
+            return Some(epoch);
+        }
+    }
+    None
+}
+
+/// Parse "--since" value: "YYYY-MM-DD" or "Nd" (e.g. "30d") → Unix epoch seconds.
+pub fn parse_since(s: &str) -> Result<i64, String> {
+    if let Some(days_str) = s.strip_suffix('d') {
+        let n: i64 = days_str
+            .parse()
+            .map_err(|_| format!("invalid --since value: {s}"))?;
+        let now = store::now_epoch_seconds().map_err(|e| e.to_string())?;
+        return Ok(now - n * 86_400);
+    }
+    // YYYY-MM-DD
+    let parts: Vec<&str> = s.splitn(3, '-').collect();
+    if parts.len() != 3 {
+        return Err(format!("invalid --since date: {s} (expected YYYY-MM-DD or Nd)"));
+    }
+    parse_date_br(&format!("{}/{}/{}", parts[2], parts[1], parts[0]))
+        .ok_or_else(|| format!("invalid --since date: {s}"))
+}
+
 fn build_normalized_json(fields: &HashMap<String, String>) -> String {
     let mut sorted: Vec<(&str, &str)> = fields
         .iter()
@@ -963,9 +1034,9 @@ fn build_normalized_json(fields: &HashMap<String, String>) -> String {
     serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub fn run_all() -> Result<(), CliError> {
+pub fn run_all(since: Option<i64>) -> Result<(), CliError> {
     collect_run(None, None)?;
-    report_latest()
+    report_latest(since)
 }
 
 pub fn config_doctor() -> Result<(), CliError> {
@@ -1151,7 +1222,7 @@ fn print_config(config: &OmensConfig) {
     );
 }
 
-pub fn report_latest() -> Result<(), CliError> {
+pub fn report_latest(since: Option<i64>) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
@@ -1183,6 +1254,11 @@ pub fn report_latest() -> Result<(), CliError> {
         })
         .collect();
 
+    // Apply --since filter: keep signal if published_at >= since OR published_at IS NULL
+    if let Some(since_ts) = since {
+        filtered.retain(|s| s.published_at.is_none_or(|ts| ts >= since_ts));
+    }
+
     // Sort: severity rank desc, confidence desc, published_at desc
     filtered.sort_by(|a, b| {
         severity_rank(&b.severity)
@@ -1202,6 +1278,9 @@ pub fn report_latest() -> Result<(), CliError> {
     println!("report latest");
     println!("  run_id: {run_id}");
     println!("  total_signals: {}", all_signals.len());
+    if let Some(since_ts) = since {
+        println!("  since: {since_ts} (epoch)");
+    }
     println!(
         "  shown: {} (critical/high + medium >= {:.0}% confidence)",
         filtered.len(),
@@ -1380,5 +1459,85 @@ pub fn map_auth_error(err: AuthError) -> CliError {
     match err {
         AuthError::AuthRequired(msg) => CliError::auth_required(msg),
         AuthError::Runtime(msg) => CliError::fatal(msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_published_at, parse_date_br, parse_since};
+
+    // 2023-08-31 00:00:00 UTC
+    const AUG31_2023: i64 = 1693440000;
+
+    #[test]
+    fn parse_date_br_valid() {
+        assert_eq!(parse_date_br("31/08/2023"), Some(AUG31_2023));
+    }
+
+    #[test]
+    fn parse_date_br_epoch_start() {
+        // 1970-01-01 = epoch 0
+        assert_eq!(parse_date_br("01/01/1970"), Some(0));
+    }
+
+    #[test]
+    fn parse_date_br_invalid() {
+        assert_eq!(parse_date_br("not-a-date"), None);
+        assert_eq!(parse_date_br("32/01/2023"), None);
+        assert_eq!(parse_date_br("01/13/2023"), None);
+        assert_eq!(parse_date_br(""), None);
+    }
+
+    #[test]
+    fn extract_date_comunicados() {
+        let json = r#"[["Assunto","Foo"],["Data Referência","31/08/2023"]]"#;
+        assert_eq!(extract_published_at("comunicados", json), Some(AUG31_2023));
+    }
+
+    #[test]
+    fn extract_date_proventos() {
+        let json = r#"[["Data Entrega","31/08/2023"],["Valor","R$1.00"]]"#;
+        assert_eq!(extract_published_at("proventos", json), Some(AUG31_2023));
+    }
+
+    #[test]
+    fn extract_date_informacoes_basicas() {
+        let json = r#"[["DATA COM","31/08/2023"],["CNPJ","00.000.000/0001-00"]]"#;
+        assert_eq!(
+            extract_published_at("informacoes_basicas", json),
+            Some(AUG31_2023)
+        );
+    }
+
+    #[test]
+    fn extract_date_missing_key() {
+        let json = r#"[["Assunto","Foo"],["Valor","R$1.00"]]"#;
+        assert_eq!(extract_published_at("comunicados", json), None);
+    }
+
+    #[test]
+    fn extract_date_cotacoes_skipped() {
+        let json = r#"[["Data Referência","31/08/2023"]]"#;
+        assert_eq!(extract_published_at("cotacoes", json), None);
+    }
+
+    #[test]
+    fn parse_since_iso_date() {
+        assert_eq!(parse_since("2023-08-31"), Ok(AUG31_2023));
+    }
+
+    #[test]
+    fn parse_since_relative_zero() {
+        // 0d means "now" — just verify it doesn't error and returns a plausible epoch
+        let result = parse_since("0d");
+        assert!(result.is_ok());
+        assert!(result.unwrap() > 1_000_000_000);
+    }
+
+    #[test]
+    fn parse_since_invalid() {
+        assert!(parse_since("bad").is_err());
+        assert!(parse_since("2023-08").is_err());
+        assert!(parse_since("xd").is_err());
     }
 }
