@@ -49,6 +49,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::ExploreStart { url } => commands::explore_start(url),
         Command::ExploreReview => commands::explore_review(),
         Command::ExplorePromote { recipe_id } => commands::explore_promote(recipe_id),
+        Command::Run => commands::run_all(),
         Command::CollectRun { sections, tickers } => commands::collect_run(sections, tickers),
         Command::ReportLatest => commands::report_latest(),
         Command::BrowserStatus => commands::browser_status(),
@@ -72,6 +73,7 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Root => {
             println!(
                 "Usage:\n  \
+  omens run\n  \
   omens auth bootstrap [--ephemeral] [--display]\n  \
   omens explore start <url-or-ticker>\n  \
   omens explore review\n  \
@@ -118,6 +120,7 @@ enum HelpTopic {
 }
 
 enum Command {
+    Run,
     AuthBootstrap {
         ephemeral: bool,
         display: bool,
@@ -173,6 +176,13 @@ impl Command {
         }
 
         match args[1].as_str() {
+            "run" => {
+                if args.len() == 2 {
+                    Ok(Command::Run)
+                } else {
+                    Err("usage: omens run".to_string())
+                }
+            }
             "auth" => parse_auth(args),
             "explore" => parse_explore(args),
             "collect" => parse_collect(args),
@@ -397,6 +407,14 @@ mod tests {
 
     fn to_args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_run_command() {
+        assert!(matches!(
+            Command::parse(&to_args(&["omens", "run"])).expect("should parse"),
+            Command::Run
+        ));
     }
 
     #[test]

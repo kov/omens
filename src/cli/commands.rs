@@ -963,6 +963,11 @@ fn build_normalized_json(fields: &HashMap<String, String>) -> String {
     serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
 }
 
+pub fn run_all() -> Result<(), CliError> {
+    collect_run(None, None)?;
+    report_latest()
+}
+
 pub fn config_doctor() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
