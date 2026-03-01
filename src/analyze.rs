@@ -106,6 +106,12 @@ pub fn score_rules(item: &AnalysisItem) -> Option<ItemSignal> {
                 severity = Severity::High;
                 confidence = 0.9;
                 reasons.push("contains 'fato relevante'".to_string());
+            } else if all_values.contains("relatório gerencial")
+                || all_values.contains("relatorio gerencial")
+            {
+                severity = Severity::High;
+                confidence = 0.85;
+                reasons.push("management report (relatório gerencial)".to_string());
             } else if all_values.contains("assembleia") || all_values.contains("alteração") {
                 confidence = 0.8;
                 if all_values.contains("assembleia") {
@@ -403,6 +409,19 @@ mod tests {
         assert!(matches!(sig.severity, Severity::High));
         assert_eq!(sig.confidence, 0.9);
         assert!(sig.reasons.iter().any(|r| r.contains("fato relevante")));
+    }
+
+    #[test]
+    fn comunicados_relatorio_gerencial_is_high() {
+        let item = make_item(
+            "comunicados",
+            r#"[["titulo","RelatóriosRelatório Gerencial"]]"#,
+            true,
+        );
+        let sig = score_rules(&item).expect("should produce signal");
+        assert!(matches!(sig.severity, Severity::High));
+        assert_eq!(sig.confidence, 0.85);
+        assert!(sig.reasons.iter().any(|r| r.contains("relatório gerencial")));
     }
 
     #[test]
