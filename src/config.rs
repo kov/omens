@@ -38,6 +38,12 @@ mod defaults {
     pub fn low_confidence() -> f64 {
         0.3
     }
+    pub fn smtp_host() -> String {
+        "smtp.gmail.com".to_string()
+    }
+    pub fn smtp_port() -> u16 {
+        587
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -56,8 +62,42 @@ pub struct OmensConfig {
     pub analysis: AnalysisConfig,
     #[serde(default)]
     pub reports: ReportsConfig,
+    #[serde(default)]
+    pub email: EmailConfig,
     #[serde(skip)]
     pub resolved: ResolvedPaths,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmailConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "defaults::smtp_host")]
+    pub smtp_host: String,
+    #[serde(default = "defaults::smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_username: String,
+    #[serde(default)]
+    pub smtp_password: String,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: Vec<String>,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            smtp_host: defaults::smtp_host(),
+            smtp_port: defaults::smtp_port(),
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            from: String::new(),
+            to: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

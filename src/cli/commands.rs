@@ -1092,6 +1092,110 @@ pub fn run_all() -> Result<(), CliError> {
     do_report(None)
 }
 
+pub fn send_email(path: String) -> Result<(), CliError> {
+    use lettre::message::header::ContentType;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{Message, SmtpTransport, Transport};
+    use std::fs;
+    use std::path::Path;
+
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    let email_cfg = &loaded.email;
+
+    if !email_cfg.enabled {
+        return Err(CliError::fatal(
+            "email is disabled; set email.enabled = true in config",
+        ));
+    }
+    if email_cfg.to.is_empty() {
+        return Err(CliError::fatal(
+            "email.to is empty; add at least one recipient in config",
+        ));
+    }
+    if email_cfg.smtp_username.is_empty() || email_cfg.smtp_password.is_empty() {
+        return Err(CliError::fatal(
+            "email.smtp_username and email.smtp_password must be set in config",
+        ));
+    }
+
+    let body = fs::read_to_string(&path)
+        .map_err(|e| CliError::fatal(format!("failed to read {path}: {e}")))?;
+
+    let stem = Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("report");
+
+    // Scan signal lines (e.g. "- C 0.90 ..." or "- H 0.85 ...") for the highest severity.
+    let highest = body
+        .lines()
+        .filter_map(|line| {
+            let s = line.trim_start_matches("- ").trim_start();
+            s.split_whitespace().next()
+        })
+        .filter_map(|token| match token {
+            "C" => Some(4u8),
+            "H" => Some(3),
+            "M" => Some(2),
+            "L" => Some(1),
+            _ => None,
+        })
+        .max();
+    let severity_tag = match highest {
+        Some(4) => " [CRITICAL]",
+        Some(3) => " [HIGH]",
+        Some(2) => " [MEDIUM]",
+        Some(1) => " [LOW]",
+        _ => "",
+    };
+    let subject = format!("{severity_tag} {stem} \u{2014} omens report");
+
+    let from_addr = if email_cfg.from.is_empty() {
+        email_cfg.smtp_username.clone()
+    } else {
+        email_cfg.from.clone()
+    };
+
+    let mut builder = Message::builder()
+        .from(
+            from_addr
+                .parse()
+                .map_err(|e| CliError::fatal(format!("invalid from address {from_addr:?}: {e}")))?,
+        )
+        .subject(&subject);
+
+    for recipient in &email_cfg.to {
+        builder = builder.to(recipient.parse().map_err(|e| {
+            CliError::fatal(format!("invalid recipient address {recipient:?}: {e}"))
+        })?);
+    }
+
+    let message = builder
+        .header(ContentType::TEXT_PLAIN)
+        .body(body)
+        .map_err(|e| CliError::fatal(format!("failed to build email message: {e}")))?;
+
+    let creds = Credentials::new(
+        email_cfg.smtp_username.clone(),
+        email_cfg.smtp_password.clone(),
+    );
+
+    let mailer = SmtpTransport::starttls_relay(&email_cfg.smtp_host)
+        .map_err(|e| CliError::fatal(format!("failed to connect to SMTP host: {e}")))?
+        .port(email_cfg.smtp_port)
+        .credentials(creds)
+        .build();
+
+    mailer
+        .send(&message)
+        .map_err(|e| CliError::fatal(format!("failed to send email: {e}")))?;
+
+    let recipients = email_cfg.to.join(", ");
+    println!("email sent: {subject} \u{2192} {recipients}");
+
+    Ok(())
+}
+
 pub fn config_doctor() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;

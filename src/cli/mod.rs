@@ -62,6 +62,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::DisplayStop => commands::display_stop(),
         Command::DisplayStatus => commands::display_status(),
         Command::FetchDoc { url_or_key } => commands::fetch_doc(url_or_key),
+        Command::SendEmail { path } => commands::send_email(path),
         Command::ConfigDoctor => commands::config_doctor(),
         Command::Help { topic } => {
             print_usage(topic);
@@ -84,6 +85,7 @@ fn print_usage(topic: HelpTopic) {
   omens report latest\n  \
   omens report since DATE|Nd\n  \
   omens fetch-doc <url-or-stable-key>\n  \
+  omens send-email <file>\n  \
   omens config doctor\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
   omens display start|stop|status"
@@ -149,6 +151,9 @@ enum Command {
     FetchDoc {
         url_or_key: String,
     },
+    SendEmail {
+        path: String,
+    },
     ConfigDoctor,
     BrowserStatus,
     BrowserInstall {
@@ -199,6 +204,7 @@ impl Command {
             "collect" => parse_collect(args),
             "report" => parse_report(args),
             "fetch-doc" => parse_fetch_doc(args),
+            "send-email" => parse_send_email(args),
             "config" => parse_config(args),
             "browser" => parse_browser(args),
             "display" => parse_display(args),
@@ -343,6 +349,15 @@ fn parse_fetch_doc(args: &[String]) -> Result<Command, String> {
         });
     }
     Err("usage: omens fetch-doc <url-or-stable-key>".to_string())
+}
+
+fn parse_send_email(args: &[String]) -> Result<Command, String> {
+    match args.get(2).map(|s| s.as_str()) {
+        Some(path) => Ok(Command::SendEmail {
+            path: path.to_string(),
+        }),
+        None => Err("usage: omens send-email <file>".to_string()),
+    }
 }
 
 fn parse_config(args: &[String]) -> Result<Command, String> {

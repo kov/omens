@@ -22,7 +22,10 @@ impl HistoricalProvento {
         let fields = parse_payload_fields(payload_json);
         let valor = find_field(&fields, &["VALOR", "valor", "Valor"]).map(|s| s.to_string());
         let is_nao_distribuicao = is_nao_distribuicao_fields(&fields);
-        Self { is_nao_distribuicao, valor }
+        Self {
+            is_nao_distribuicao,
+            valor,
+        }
     }
 }
 
@@ -109,7 +112,10 @@ fn is_nao_distribuicao_fields(fields: &[(String, String)]) -> bool {
     let tipo = find_field(fields, &["TIPO", "tipo", "Tipo"]);
     let valor_upper = valor.map(|v| v.to_uppercase());
     let tipo_upper = tipo.map(|t| t.to_uppercase());
-    tipo_upper.as_deref().map(|t| t.contains("NÃO")).unwrap_or(false)
+    tipo_upper
+        .as_deref()
+        .map(|t| t.contains("NÃO"))
+        .unwrap_or(false)
         || valor_upper
             .as_deref()
             .map(|v| v.contains("NÃO") || v == "0,000" || v == "0")
@@ -179,10 +185,7 @@ pub fn score_rules(item: &AnalysisItem, history: &[HistoricalProvento]) -> Optio
 
             if current_nao {
                 // Count consecutive prior NÃO DISTRIBUIÇÃO months in history.
-                let consecutive = history
-                    .iter()
-                    .take_while(|h| h.is_nao_distribuicao)
-                    .count();
+                let consecutive = history.iter().take_while(|h| h.is_nao_distribuicao).count();
                 let (severity, confidence, reason) = if consecutive == 0 {
                     // First occurrence (or resumption after paying): alarming
                     (Severity::High, 0.9, "NÃO DISTRIBUIÇÃO (first occurrence)")
@@ -205,10 +208,7 @@ pub fn score_rules(item: &AnalysisItem, history: &[HistoricalProvento]) -> Optio
 
             if item.is_new {
                 // Count how many consecutive prior months were NÃO DISTRIBUIÇÃO.
-                let prior_nao = history
-                    .iter()
-                    .take_while(|h| h.is_nao_distribuicao)
-                    .count();
+                let prior_nao = history.iter().take_while(|h| h.is_nao_distribuicao).count();
                 // Most recent prior paid value (first non-NÃO entry in history).
                 let last_paid = history
                     .iter()
@@ -481,11 +481,17 @@ mod tests {
     }
 
     fn paid(valor: &str) -> HistoricalProvento {
-        HistoricalProvento { is_nao_distribuicao: false, valor: Some(valor.to_string()) }
+        HistoricalProvento {
+            is_nao_distribuicao: false,
+            valor: Some(valor.to_string()),
+        }
     }
 
     fn nao() -> HistoricalProvento {
-        HistoricalProvento { is_nao_distribuicao: true, valor: None }
+        HistoricalProvento {
+            is_nao_distribuicao: true,
+            valor: None,
+        }
     }
 
     #[test]
@@ -520,7 +526,11 @@ mod tests {
         let sig = score_rules(&item, &[]).expect("should produce signal");
         assert!(matches!(sig.severity, Severity::High));
         assert_eq!(sig.confidence, 0.85);
-        assert!(sig.reasons.iter().any(|r| r.contains("relatório gerencial")));
+        assert!(
+            sig.reasons
+                .iter()
+                .any(|r| r.contains("relatório gerencial"))
+        );
     }
 
     #[test]

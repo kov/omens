@@ -155,3 +155,10 @@ bwrap \
     > "$OUTPUT_FILE"
 
 echo "[$(date -Iseconds)] Report saved: $OUTPUT_FILE"
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Email report
+# ---------------------------------------------------------------------------
+
+echo "[$(date -Iseconds)] Emailing report..."
+"$OMENS" send-email "$OUTPUT_FILE"
