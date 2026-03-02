@@ -36,6 +36,11 @@ pub trait BrowserHarness {
         max_rows: usize,
     ) -> Result<Vec<HashMap<String, String>>, String>;
     fn shutdown(&mut self) -> Result<(), String>;
+    /// Find the href of the first element matching `selector`.
+    fn find_link_href(&self, selector: &str) -> Result<Option<String>, String>;
+    /// Find the href of the first link in a table row whose text contains `search_text`.
+    /// Also looks for onclick-embedded URLs (window.open patterns).
+    fn find_row_link_by_text(&self, search_text: &str) -> Result<Option<String>, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -686,6 +691,63 @@ impl BrowserHarness for ChromiumoxideHarness {
             .into_value()
             .unwrap_or_default();
         Ok(rows)
+    }
+
+    fn find_link_href(&self, selector: &str) -> Result<Option<String>, String> {
+        let page = self.page()?.clone();
+        let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
+        let js = format!(
+            "(function() {{ \
+                var el = document.querySelector({sel_json}); \
+                if (!el) return null; \
+                return el.href || el.getAttribute('href') || null; \
+            }})()"
+        );
+        let result: Option<String> = self
+            .runtime
+            .block_on(async {
+                page.evaluate(js)
+                    .await
+                    .map_err(|e| format!("find_link_href: {e}"))
+            })?
+            .into_value()
+            .unwrap_or(None);
+        Ok(result)
+    }
+
+    fn find_row_link_by_text(&self, search_text: &str) -> Result<Option<String>, String> {
+        let page = self.page()?.clone();
+        let text_json = serde_json::to_string(search_text).unwrap_or_else(|_| "\"\"".to_string());
+        let js = format!(
+            r#"(function() {{
+                var searchText = {text_json};
+                var rows = document.querySelectorAll('table tbody tr');
+                for (var i = 0; i < rows.length; i++) {{
+                    if (!(rows[i].textContent || '').includes(searchText)) continue;
+                    var links = rows[i].querySelectorAll('a');
+                    for (var j = 0; j < links.length; j++) {{
+                        var a = links[j];
+                        var href = a.getAttribute('href') || '';
+                        if (href.startsWith('http')) return href;
+                        // onclick: window.open('URL')
+                        var onclick = a.getAttribute('onclick') || '';
+                        var m = onclick.match(/window\.open\(['"]([^'"]+)['"]/);
+                        if (m) return m[1];
+                    }}
+                }}
+                return null;
+            }})()"#
+        );
+        let result: Option<String> = self
+            .runtime
+            .block_on(async {
+                page.evaluate(js)
+                    .await
+                    .map_err(|e| format!("find_row_link_by_text: {e}"))
+            })?
+            .into_value()
+            .unwrap_or(None);
+        Ok(result)
     }
 
     fn shutdown(&mut self) -> Result<(), String> {

@@ -61,6 +61,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::DisplayStart { listen_addr } => commands::display_start(listen_addr),
         Command::DisplayStop => commands::display_stop(),
         Command::DisplayStatus => commands::display_status(),
+        Command::FetchDoc { url_or_key } => commands::fetch_doc(url_or_key),
         Command::ConfigDoctor => commands::config_doctor(),
         Command::Help { topic } => {
             print_usage(topic);
@@ -82,6 +83,7 @@ fn print_usage(topic: HelpTopic) {
   omens collect run [--sections csv] [--tickers csv]\n  \
   omens report latest\n  \
   omens report since DATE|Nd\n  \
+  omens fetch-doc <url-or-stable-key>\n  \
   omens config doctor\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
   omens display start|stop|status"
@@ -144,6 +146,9 @@ enum Command {
     ReportSince {
         since: i64,
     },
+    FetchDoc {
+        url_or_key: String,
+    },
     ConfigDoctor,
     BrowserStatus,
     BrowserInstall {
@@ -193,6 +198,7 @@ impl Command {
             "explore" => parse_explore(args),
             "collect" => parse_collect(args),
             "report" => parse_report(args),
+            "fetch-doc" => parse_fetch_doc(args),
             "config" => parse_config(args),
             "browser" => parse_browser(args),
             "display" => parse_display(args),
@@ -323,6 +329,20 @@ fn parse_report(args: &[String]) -> Result<Command, String> {
         return Ok(Command::ReportSince { since });
     }
     Err("usage: omens report latest\n       omens report since DATE|Nd".to_string())
+}
+
+fn parse_fetch_doc(args: &[String]) -> Result<Command, String> {
+    if args.len() == 3 && is_help(args[2].as_str()) {
+        return Ok(Command::Help {
+            topic: HelpTopic::Root,
+        });
+    }
+    if args.len() == 3 {
+        return Ok(Command::FetchDoc {
+            url_or_key: args[2].clone(),
+        });
+    }
+    Err("usage: omens fetch-doc <url-or-stable-key>".to_string())
 }
 
 fn parse_config(args: &[String]) -> Result<Command, String> {

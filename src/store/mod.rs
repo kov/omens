@@ -183,6 +183,12 @@ impl RecipeStatus {
 }
 
 #[derive(Debug, Clone)]
+pub struct DocItemRef {
+    pub url: Option<String>,
+    pub normalized_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct RecipeRow {
     pub id: i64,
@@ -798,6 +804,24 @@ impl Store {
             return Err(format!("recipe {recipe_id} not found"));
         }
         Ok(())
+    }
+
+    pub fn find_item_by_stable_key(&self, stable_key: &str) -> Result<Option<DocItemRef>, String> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT url, normalized_json FROM items WHERE stable_key = ?1",
+                params![stable_key],
+                |row| {
+                    Ok(DocItemRef {
+                        url: row.get(0)?,
+                        normalized_json: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|err| format!("failed querying item {stable_key}: {err}"))?;
+        Ok(result)
     }
 }
 

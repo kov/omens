@@ -191,6 +191,28 @@ Signals:
   [MEDIUM   0.80] contains 'assembleia': ...
 ```
 
+### Step 2b — Fetch Document Text (on demand)
+
+To read the full text of a comunicado or other document stored in the DB:
+
+```bash
+cargo run -- fetch-doc 'external_id:TICKER/comunicados/...'   # by stable_key
+cargo run -- fetch-doc 'https://bvmf.bmfbovespa.com.br/...'  # by URL
+```
+
+- Accepts a **stable_key** (from DB) or a **direct URL**
+- Stable-key mode: navigates to the ticker's list page, finds the document link
+  by matching the row text (Categoria, Data Referência, etc.), then fetches it
+- Handles two document types automatically:
+  - **B3/FNET** (`bvmf.bmfbovespa.com.br`, `fnet.bmfbovespa.com.br`): public PDF,
+    downloaded with reqwest and converted via `pdftotext -layout`
+  - **Clubefii embed** (`fundo_comunicados_embed`): follows the download link to the PDF
+  - **HTML pages**: tag-stripped to plain text
+- Results are **cached** in `~/.cache/omens/docs/` — subsequent calls are instant
+- Output goes to stdout; useful for piping or reading inline
+
+Requires the display to be running (same as `collect run`).
+
 ### Step 3 — Report
 
 Two report subcommands, serving different purposes:
@@ -389,3 +411,5 @@ No explore needed — existing recipes cover all clubefii.com.br tickers.
 | Browser login fails / session lost | Stale or corrupt profile | `cargo run -- browser reset-profile` then `auth bootstrap` again |
 | Many `items_changed` on re-run | Key collision from past run | Check `stable_key` uniqueness in DB |
 | Signals not showing in report | Low confidence / below threshold | Check `high_impact` in config; or signal is `medium < 0.8` |
+| `fetch-doc`: no document link found | Assunto is N/D and row text doesn't match | Try passing the B3/FNET URL directly instead of the stable_key |
+| `fetch-doc`: empty output | B3 URL served HTML (not PDF) or page timed out | Delete `~/.cache/omens/docs/<hash>.txt` and retry |

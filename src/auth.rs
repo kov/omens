@@ -230,6 +230,14 @@ mod tests {
         fn shutdown(&mut self) -> Result<(), String> {
             Ok(())
         }
+
+        fn find_link_href(&self, _selector: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+
+        fn find_row_link_by_text(&self, _search_text: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
     }
 
     fn base_config() -> AuthValidationConfig {

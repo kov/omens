@@ -1276,6 +1276,371 @@ pub fn report_since(since_ts: i64) -> Result<(), CliError> {
     do_report(Some(since_ts))
 }
 
+// ── fetch-doc ────────────────────────────────────────────────────────────────
+
+/// Fetch the text content of a document identified by URL or stable_key.
+/// Navigates using the authenticated browser, handles FNET HTML pages and
+/// clubefii embed PDF pages. Outputs text to stdout. Caches in
+/// ~/.cache/omens/docs/.
+pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let home = std::env::var("HOME")
+        .map_err(|_| CliError::fatal("HOME environment variable is not set"))?;
+    let cache_dir = std::path::Path::new(&home).join(".cache/omens/docs");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| CliError::fatal(format!("failed to create cache dir: {e}")))?;
+
+    let is_url = url_or_key.starts_with("http://") || url_or_key.starts_with("https://");
+
+    // For direct URLs, check cache before launching the browser.
+    if is_url {
+        let cache_path = cache_dir.join(format!("{}.txt", store::content_hash_fnv(&url_or_key)));
+        if cache_path.exists() {
+            let text = std::fs::read_to_string(&cache_path)
+                .map_err(|e| CliError::fatal(format!("read cache: {e}")))?;
+            print!("{text}");
+            return Ok(());
+        }
+    }
+
+    // Set up browser (needed for both stable_key lookup and authenticated fetch).
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
+    let profile_path = manager.default_profile_dir().to_path_buf();
+
+    let mut launch_env = Vec::<(String, String)>::new();
+    let display_mgr = DisplayManager::new(&loaded.resolved.root_dir);
+    if let Ok(status) = display_mgr.status()
+        && let Some(session) = status.session
+    {
+        launch_env.push((
+            "XDG_RUNTIME_DIR".to_string(),
+            session.runtime_dir.display().to_string(),
+        ));
+        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+    }
+
+    // Determine the initial URL to open in the browser.
+    let initial_url = if is_url {
+        url_or_key.clone()
+    } else {
+        // stable_key: look up list-page URL from the DB.
+        let stable_key = if url_or_key.starts_with("external_id:") {
+            url_or_key.clone()
+        } else {
+            format!("external_id:{}", url_or_key)
+        };
+        let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
+        store.migrate().map_err(CliError::fatal)?;
+        let item = store
+            .find_item_by_stable_key(&stable_key)
+            .map_err(CliError::fatal)?
+            .ok_or_else(|| CliError::fatal(format!("item not found in DB: {stable_key}")))?;
+        item.url
+            .ok_or_else(|| CliError::fatal("item has no source URL stored in DB"))?
+    };
+
+    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
+        .map_err(CliError::fatal)?;
+    harness.launch(&initial_url).map_err(CliError::fatal)?;
+    std::thread::sleep(Duration::from_secs(3));
+    harness.dismiss_overlays();
+
+    // For stable_key: navigate list page, click the tab, and find the document link.
+    let doc_url = if !is_url {
+        // Extract stable_key again for metadata lookup.
+        let stable_key = if url_or_key.starts_with("external_id:") {
+            url_or_key.clone()
+        } else {
+            format!("external_id:{}", url_or_key)
+        };
+        let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
+        let item = store
+            .find_item_by_stable_key(&stable_key)
+            .map_err(CliError::fatal)?
+            .ok_or_else(|| CliError::fatal(format!("item not found: {stable_key}")))?;
+
+        // Build a search string for matching the document row in the table.
+        // Prefer Assunto (if not a placeholder), then Categoria, then Data Referência.
+        let normalized = item.normalized_json.unwrap_or_default();
+        let is_placeholder = |s: &str| {
+            let t = s.trim();
+            t.is_empty() || t == "N/D" || t == "N/A" || t == "-" || t == "--"
+        };
+        let assunto = fetch_doc_payload_field(&normalized, "Assunto")
+            .or_else(|| fetch_doc_payload_field(&normalized, "assunto"))
+            .filter(|s| !is_placeholder(s))
+            .or_else(|| {
+                // Category often contains the document type (non-placeholder even when Assunto is N/D).
+                fetch_doc_payload_field(&normalized, "Categoria").filter(|s| !is_placeholder(s))
+            })
+            .or_else(|| fetch_doc_payload_field(&normalized, "Data Referência"))
+            .or_else(|| fetch_doc_payload_field(&normalized, "Data Entrega"))
+            .unwrap_or_else(|| {
+                // Last resort: part of the stable_key after the last '|'
+                stable_key
+                    .rsplit('|')
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(40)
+                    .collect()
+            });
+
+        // Extract section from stable_key to know which tab to click.
+        let section = stable_key
+            .strip_prefix("external_id:")
+            .unwrap_or(&stable_key)
+            .split('/')
+            .nth(1)
+            .unwrap_or("comunicados");
+
+        // Click the section tab.
+        let tab_sel = format!("a[href='#{section}']");
+        if let Err(e) = harness.click_and_wait(&tab_sel, 10_000) {
+            eprintln!("fetch-doc: tab click failed ({e}), trying to find link without clicking");
+        } else {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        // Find the document link by searching for the assunto text in table rows.
+        let search = assunto.chars().take(40).collect::<String>();
+        match harness
+            .find_row_link_by_text(&search)
+            .map_err(CliError::fatal)?
+        {
+            Some(href) => {
+                eprintln!("fetch-doc: found document link: {href}");
+                href
+            }
+            None => {
+                harness.shutdown().ok();
+                return Err(CliError::fatal(format!(
+                    "no document link found in table for search text: {search}"
+                )));
+            }
+        }
+    } else {
+        url_or_key.clone()
+    };
+
+    // Check cache for the resolved doc URL.
+    let cache_path = cache_dir.join(format!("{}.txt", store::content_hash_fnv(&doc_url)));
+    if cache_path.exists() {
+        harness.shutdown().ok();
+        let text = std::fs::read_to_string(&cache_path)
+            .map_err(|e| CliError::fatal(format!("read cache: {e}")))?;
+        print!("{text}");
+        return Ok(());
+    }
+
+    // Navigate to the document URL if we haven't already.
+    if !is_url || doc_url != url_or_key {
+        harness.navigate(&doc_url).map_err(CliError::fatal)?;
+        std::thread::sleep(Duration::from_secs(3));
+    }
+
+    let text = fetch_doc_extract_text(&harness, &doc_url)?;
+
+    harness.shutdown().ok();
+
+    let _ = std::fs::write(&cache_path, &text);
+    print!("{text}");
+    Ok(())
+}
+
+/// Extract text from the current page.  Handles clubefii embed pages (find the
+/// BAIXAR COMUNICADO link, download PDF) and FNET pages (may render PDF directly
+/// or have a download link), and falls back to HTML-to-text for other pages.
+fn fetch_doc_extract_text(harness: &ChromiumoxideHarness, url: &str) -> Result<String, CliError> {
+    if url.contains("fundo_comunicados_embed") {
+        // clubefii embed page: look for the actual document download link.
+        let link = harness
+            .find_link_href(
+                "a[href*='fnet'], a[href*='exibirDocumento'], a[href$='.pdf'], \
+                 a[href*='download'], a[href*='bmfbovespa']",
+            )
+            .map_err(CliError::fatal)?;
+        if let Some(href) = link {
+            if href.contains(".pdf") || href.contains("exibirDocumento") {
+                return fetch_doc_pdf_to_text(&href);
+            }
+            // Might be an FNET page URL — recurse once.
+            harness.navigate(&href).map_err(CliError::fatal)?;
+            std::thread::sleep(Duration::from_secs(3));
+            return fetch_doc_extract_text(harness, &href);
+        }
+        // Fall back to page text (the embed page might have inline text).
+        let html = harness.page_source().map_err(CliError::fatal)?;
+        Ok(html_to_text(&html))
+    } else if url.contains("fnet.bmfbovespa.com.br")
+        || url.contains("bvmf.bmfbovespa.com.br")
+        || url.contains("b3.com.br")
+        || url.ends_with(".pdf")
+    {
+        // FNET/B3 document page: these URLs often serve PDFs directly.  Try
+        // reqwest first; if the response looks like a PDF, pipe through pdftotext.
+        // Fall back to extracting text from the HTML page source.
+        match fetch_doc_pdf_to_text(url) {
+            Ok(text) if !text.trim().is_empty() => return Ok(text),
+            _ => {}
+        }
+        // Maybe the page has a PDF download link (FNET viewer pattern).
+        let pdf_link = harness
+            .find_link_href("a[href$='.pdf'], #lnkDownload, a[href*='download']")
+            .map_err(CliError::fatal)?;
+        if let Some(href) = pdf_link {
+            return fetch_doc_pdf_to_text(&href);
+        }
+        let html = harness.page_source().map_err(CliError::fatal)?;
+        Ok(html_to_text(&html))
+    } else {
+        let html = harness.page_source().map_err(CliError::fatal)?;
+        Ok(html_to_text(&html))
+    }
+}
+
+/// Download a document from `url` using reqwest (with browser-like headers).
+/// If the response content-type is PDF (or the first bytes are `%PDF`), convert
+/// via `pdftotext -layout`; otherwise treat as HTML.
+fn fetch_doc_pdf_to_text(url: &str) -> Result<String, CliError> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        )
+        .build()
+        .map_err(|e| CliError::fatal(format!("reqwest client: {e}")))?;
+    let resp = client
+        .get(url)
+        .header("Referer", "https://www.clubefii.com.br/")
+        .send()
+        .map_err(|e| CliError::fatal(format!("fetch {url}: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(CliError::fatal(format!(
+            "HTTP {} fetching document URL: {url}",
+            resp.status()
+        )));
+    }
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    let bytes = resp
+        .bytes()
+        .map_err(|e| CliError::fatal(format!("reading response body: {e}")))?;
+
+    // Detect PDF by content-type or magic bytes.
+    let is_pdf = content_type.contains("pdf") || bytes.starts_with(b"%PDF");
+
+    if !is_pdf {
+        // Treat as HTML.
+        let html = String::from_utf8_lossy(&bytes).into_owned();
+        return Ok(html_to_text(&html));
+    }
+
+    // Write to a temp file keyed on URL hash.
+    let tmp_path = format!("/tmp/omens-doc-{}.pdf", store::content_hash_fnv(url));
+    std::fs::write(&tmp_path, bytes.as_ref())
+        .map_err(|e| CliError::fatal(format!("write temp PDF: {e}")))?;
+
+    let output = std::process::Command::new("pdftotext")
+        .arg("-layout")
+        .arg(&tmp_path)
+        .arg("-")
+        .output()
+        .map_err(|e| CliError::fatal(format!("pdftotext failed (is it installed?): {e}")))?;
+
+    let _ = std::fs::remove_file(&tmp_path);
+
+    if !output.status.success() {
+        return Err(CliError::fatal(format!(
+            "pdftotext exit {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Extract a field value from a `[["key","val"],...]` normalized_json string.
+fn fetch_doc_payload_field(normalized_json: &str, key: &str) -> Option<String> {
+    let pairs: Vec<Vec<String>> = serde_json::from_str(normalized_json).ok()?;
+    pairs
+        .into_iter()
+        .find(|kv| kv.first().map(|k| k.as_str()) == Some(key))
+        .and_then(|kv| kv.into_iter().nth(1))
+}
+
+/// Strip HTML tags and normalize whitespace.  Not a full HTML parser but
+/// sufficient for extracting the readable text from structured pages.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut in_tag = false;
+    let mut in_script = false;
+    let mut in_style = false;
+    let mut tag_buf = String::new();
+
+    for c in html.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag_buf.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                let tl = tag_buf.trim().to_lowercase();
+                let name = tl
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                match name {
+                    "script" => in_script = !tl.starts_with('/'),
+                    "style" => in_style = !tl.starts_with('/'),
+                    "br" | "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                    | "td" | "th" => {
+                        if !in_script && !in_style {
+                            out.push('\n');
+                        }
+                    }
+                    _ => {}
+                }
+                tag_buf.clear();
+            }
+            _ if in_tag => {
+                tag_buf.push(c);
+            }
+            _ if !in_script && !in_style => {
+                out.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    // Collapse runs of whitespace; preserve single blank lines.
+    let mut result = String::with_capacity(out.len());
+    let mut blank_lines = 0u32;
+    for line in out.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            blank_lines += 1;
+            if blank_lines == 1 {
+                result.push('\n');
+            }
+        } else {
+            blank_lines = 0;
+            result.push_str(trimmed);
+            result.push('\n');
+        }
+    }
+    result.trim().to_string()
+}
+
 fn do_report(since: Option<i64>) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;

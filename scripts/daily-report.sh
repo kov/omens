@@ -10,7 +10,7 @@ OUTPUT_DIR="$HOME/Documents/omens"
 OUTPUT_FILE="$OUTPUT_DIR/$DATE.md"
 PROMPT_FILE="$HOME/.cache/omens/prompt.txt"
 
-mkdir -p "$OUTPUT_DIR" "$HOME/.cache/omens"
+mkdir -p "$OUTPUT_DIR" "$HOME/.cache/omens/docs"
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Collect (runs outside bwrap, needs full display/browser access)
@@ -73,8 +73,10 @@ already queried for X and Y and the data is genuinely absent from the DB.
 2. Check the full history for that ticker/section: how has the value changed
    across runs? Is the current version consistent with prior ones?
 3. If a comunicado or relatório gerencial exists for that ticker in the DB,
-   read its payload — it often directly answers "why did this change?"
-4. Only after exhausting the DB should you write your finding.
+   fetch its full text and read it — it often directly answers "why did this change?":
+     ~/.local/bin/omens fetch-doc 'external_id:TICKER/comunicados/...' # use the stable_key
+   Results are cached in ~/.cache/omens/docs/ on first fetch.
+4. Only after exhausting the DB and any available documents should you write your finding.
 
 **Key queries:**
   # All versions of an item (see how data changed across runs)
@@ -100,8 +102,9 @@ already queried for X and Y and the data is genuinely absent from the DB.
     WHERE i.external_id LIKE '%TICKER%'
     ORDER BY r.id"
 
-  ~/.local/bin/omens report since 7d   # compact view of recent signals
-  ~/.local/bin/omens report since 30d  # broader context
+  ~/.local/bin/omens report since 7d    # compact view of recent signals
+  ~/.local/bin/omens report since 30d   # broader context
+  ~/.local/bin/omens fetch-doc 'external_id:TICKER/comunicados/...'  # fetch full document text
 
 **Output:** Escreva em português (pt-BR). Relatório conciso em Markdown cobrindo:
 - O que aconteceu de fato (não apenas o rótulo do sinal)
@@ -135,6 +138,7 @@ bwrap \
     --tmpfs /tmp \
     --bind "$HOME/.claude" "$HOME/.claude" \
     --bind "$HOME/.omens/db" "$HOME/.omens/db" \
+    --bind "$HOME/.cache/omens" "$HOME/.cache/omens" \
     -- \
     env -u CLAUDECODE \
     "$CLAUDE" \
