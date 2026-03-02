@@ -495,7 +495,14 @@ impl Store {
                 .execute(
                     "UPDATE items SET last_seen_at = ?1, content_hash = ?2, normalized_json = ?3, \
                      raw_hash = ?4, published_at = COALESCE(published_at, ?5) WHERE id = ?6",
-                    params![now_epoch, content_hash, normalized_json, raw_hash, published_at, id],
+                    params![
+                        now_epoch,
+                        content_hash,
+                        normalized_json,
+                        raw_hash,
+                        published_at,
+                        id
+                    ],
                 )
                 .map_err(|err| format!("failed updating item {id}: {err}"))?;
             Ok((id, false))
@@ -585,10 +592,7 @@ impl Store {
     }
 
     /// Return all item versions inserted in this run, with how many total versions each item has.
-    pub fn items_for_analysis(
-        &self,
-        run_id: i64,
-    ) -> Result<Vec<ItemVersionForAnalysis>, String> {
+    pub fn items_for_analysis(&self, run_id: i64) -> Result<Vec<ItemVersionForAnalysis>, String> {
         let mut stmt = self
             .conn
             .prepare(
@@ -679,10 +683,7 @@ impl Store {
     }
 
     /// Return signals for a run joined with their item metadata.
-    pub fn signals_with_items_for_run(
-        &self,
-        run_id: i64,
-    ) -> Result<Vec<SignalWithItem>, String> {
+    pub fn signals_with_items_for_run(&self, run_id: i64) -> Result<Vec<SignalWithItem>, String> {
         let mut stmt = self
             .conn
             .prepare(
@@ -715,6 +716,50 @@ impl Store {
                 })
             })
             .map_err(|err| format!("failed querying signals_with_items: {err}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|err| format!("failed reading signal_with_item row: {err}"))?);
+        }
+        Ok(result)
+    }
+
+    /// Return signals across all runs where the item's `published_at >= since_ts`.
+    /// When the same item has signals from multiple runs, only the most recent signal is returned.
+    pub fn signals_since(&self, since_ts: i64) -> Result<Vec<SignalWithItem>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.id, s.run_id, s.kind, s.severity, s.confidence,
+                        s.reasons_json, s.summary,
+                        i.id, i.section, i.stable_key, i.title, i.url, i.published_at
+                 FROM signals s
+                 JOIN items i ON i.id = s.item_id
+                 WHERE i.published_at >= ?1
+                   AND s.id = (SELECT MAX(s2.id) FROM signals s2 WHERE s2.item_id = s.item_id)
+                 ORDER BY s.id",
+            )
+            .map_err(|err| format!("failed preparing signals_since query: {err}"))?;
+
+        let rows = stmt
+            .query_map(params![since_ts], |row| {
+                Ok(SignalWithItem {
+                    signal_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    severity: row.get(3)?,
+                    confidence: row.get(4)?,
+                    reasons_json: row.get(5)?,
+                    summary: row.get(6)?,
+                    item_id: row.get(7)?,
+                    section: row.get(8)?,
+                    stable_key: row.get(9)?,
+                    title: row.get(10)?,
+                    url: row.get(11)?,
+                    published_at: row.get(12)?,
+                })
+            })
+            .map_err(|err| format!("failed querying signals_since: {err}"))?;
 
         let mut result = Vec::new();
         for row in rows {
@@ -1149,7 +1194,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("query after update");
-        assert_eq!(ts2, Some(1693440000), "COALESCE should preserve existing date");
+        assert_eq!(
+            ts2,
+            Some(1693440000),
+            "COALESCE should preserve existing date"
+        );
     }
 
     #[test]
@@ -1228,7 +1277,19 @@ mod tests {
         let run2 = store.start_run("proventos", 200).expect("run2");
 
         let (item_id, _) = store
-            .upsert_item("clubefii", "proventos", None, None, "key:A", None, None, "h1", "{}", 100, None)
+            .upsert_item(
+                "clubefii",
+                "proventos",
+                None,
+                None,
+                "key:A",
+                None,
+                None,
+                "h1",
+                "{}",
+                100,
+                None,
+            )
             .expect("upsert item");
 
         // Insert first version in run1
@@ -1283,7 +1344,13 @@ mod tests {
         assert_eq!(sigs[0].severity, "high");
         assert!((sigs[0].confidence - 0.9).abs() < 1e-9);
         assert_eq!(sigs[0].summary, "dividend changed: key:A");
-        assert!(sigs[0].reasons_json.as_deref().unwrap_or("").contains("revised"));
+        assert!(
+            sigs[0]
+                .reasons_json
+                .as_deref()
+                .unwrap_or("")
+                .contains("revised")
+        );
     }
 
     #[test]
@@ -1377,7 +1444,10 @@ mod tests {
         let r2 = store.start_run("b", 200).expect("run2");
         let r3 = store.start_run("c", 50).expect("run3"); // started_at lower than r2
 
-        let latest = store.latest_run_id().expect("latest_run_id").expect("should have a run");
+        let latest = store
+            .latest_run_id()
+            .expect("latest_run_id")
+            .expect("should have a run");
         // r2 has started_at=200, which is highest
         assert_eq!(latest, r2);
         let _ = (r1, r3); // suppress unused warnings

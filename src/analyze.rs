@@ -151,7 +151,10 @@ pub fn score_rules(item: &AnalysisItem) -> Option<ItemSignal> {
             let valor_upper = valor.map(|v| v.to_uppercase());
             let tipo_upper = tipo.map(|t| t.to_uppercase());
 
-            let is_nao_distribuicao = tipo_upper.as_deref().map(|t| t.contains("NÃO")).unwrap_or(false)
+            let is_nao_distribuicao = tipo_upper
+                .as_deref()
+                .map(|t| t.contains("NÃO"))
+                .unwrap_or(false)
                 || valor_upper
                     .as_deref()
                     .map(|v| v.contains("NÃO") || v == "0,000" || v == "0")
@@ -350,10 +353,11 @@ pub fn analyze_items(items: &[AnalysisItem], cfg: &AnalysisConfig) -> Vec<ItemSi
         .collect();
 
     signals.sort_by(|a, b| {
-        b.severity
-            .rank()
-            .cmp(&a.severity.rank())
-            .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+        b.severity.rank().cmp(&a.severity.rank()).then(
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
 
     signals
@@ -421,7 +425,11 @@ mod tests {
         let sig = score_rules(&item).expect("should produce signal");
         assert!(matches!(sig.severity, Severity::High));
         assert_eq!(sig.confidence, 0.85);
-        assert!(sig.reasons.iter().any(|r| r.contains("relatório gerencial")));
+        assert!(
+            sig.reasons
+                .iter()
+                .any(|r| r.contains("relatório gerencial"))
+        );
     }
 
     #[test]
@@ -455,7 +463,11 @@ mod tests {
         let sig = score_rules(&item).expect("should produce signal");
         assert!(matches!(sig.severity, Severity::Medium));
         assert_eq!(sig.confidence, 0.85);
-        assert!(sig.reasons.iter().any(|r| r.contains("new positive dividend")));
+        assert!(
+            sig.reasons
+                .iter()
+                .any(|r| r.contains("new positive dividend"))
+        );
     }
 
     #[test]

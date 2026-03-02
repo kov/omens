@@ -293,8 +293,8 @@ pub fn bootstrap_layout(config: &OmensConfig) -> Result<(), String> {
 fn parse_config_file(path: &Path) -> Result<OmensConfig, String> {
     let text = fs::read_to_string(path)
         .map_err(|e| format!("failed to read config file {}: {e}", path.display()))?;
-    let config: OmensConfig = toml::from_str(&text)
-        .map_err(|e| format!("config parse error: {e}"))?;
+    let config: OmensConfig =
+        toml::from_str(&text).map_err(|e| format!("config parse error: {e}"))?;
     validate_semantics(&config)?;
     Ok(config)
 }

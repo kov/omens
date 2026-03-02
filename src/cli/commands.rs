@@ -484,7 +484,9 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
     if !missing.is_empty() {
         for (item_id, section, json) in &missing {
             if let Some(ts) = extract_published_at(section, json) {
-                store.set_published_at(*item_id, ts).map_err(CliError::fatal)?;
+                store
+                    .set_published_at(*item_id, ts)
+                    .map_err(CliError::fatal)?;
             }
         }
         println!("  backfilled published_at for {} items", missing.len());
@@ -750,10 +752,13 @@ fn do_collect(
                 //   • Informe Mensal + N/D Assunto + same Data Referência for
                 //     V.1 & V.2 → 3-cell key (date + Data Entrega)
                 const STABLE_HDRS: &[&str] = &[
-                    "Assunto", "assunto",
-                    "Data Referência", "Data Referencia",
+                    "Assunto",
+                    "assunto",
+                    "Data Referência",
+                    "Data Referencia",
                     "Data Entrega",
-                    "MÊS REF.", "MES REF.",
+                    "MÊS REF.",
+                    "MES REF.",
                     "DATA COM",
                     "Status / Modalidade Envio",
                 ];
@@ -766,7 +771,11 @@ fn do_collect(
                     .enumerate()
                     .map(|(i, cells)| {
                         let first = cells.first().map(|s| s.trim()).unwrap_or("");
-                        if first.is_empty() { i.to_string() } else { first.to_string() }
+                        if first.is_empty() {
+                            i.to_string()
+                        } else {
+                            first.to_string()
+                        }
                     })
                     .collect();
 
@@ -909,10 +918,7 @@ fn do_collect(
 
                 for (row_idx, fields) in rows.iter().enumerate() {
                     let first_fid = field_ids.first().copied().unwrap_or("id");
-                    let first_val = fields
-                        .get(first_fid)
-                        .map(|s| s.trim())
-                        .unwrap_or("");
+                    let first_val = fields.get(first_fid).map(|s| s.trim()).unwrap_or("");
                     let primary_key = if first_val.is_empty() {
                         row_idx.to_string()
                     } else if first_fid_counts.get(first_val).copied().unwrap_or(0) <= 1 {
@@ -1004,7 +1010,12 @@ fn extract_published_at(section: &str, normalized_json: &str) -> Option<i64> {
             "data referencia",
             "data entrega",
         ],
-        "proventos" => &["DATA BASE", "DATA PAGAMENTO", "Data Referência", "Data Referencia"],
+        "proventos" => &[
+            "DATA BASE",
+            "DATA PAGAMENTO",
+            "Data Referência",
+            "Data Referencia",
+        ],
         "informacoes_basicas" => &[
             "data referência",
             "data referencia",
@@ -1016,7 +1027,9 @@ fn extract_published_at(section: &str, normalized_json: &str) -> Option<i64> {
         _ => return None,
     };
     for [key, val] in &pairs {
-        if date_keys.contains(&key.as_str()) && let Some(epoch) = parse_date_br(val) {
+        if date_keys.contains(&key.as_str())
+            && let Some(epoch) = parse_date_br(val)
+        {
             return Some(epoch);
         }
     }
@@ -1035,7 +1048,9 @@ pub fn parse_since(s: &str) -> Result<i64, String> {
     // YYYY-MM-DD
     let parts: Vec<&str> = s.splitn(3, '-').collect();
     if parts.len() != 3 {
-        return Err(format!("invalid --since date: {s} (expected YYYY-MM-DD or Nd)"));
+        return Err(format!(
+            "invalid --since date: {s} (expected YYYY-MM-DD or Nd)"
+        ));
     }
     parse_date_br(&format!("{}/{}/{}", parts[2], parts[1], parts[0]))
         .ok_or_else(|| format!("invalid --since date: {s}"))
@@ -1050,9 +1065,9 @@ fn build_normalized_json(fields: &HashMap<String, String>) -> String {
     serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub fn run_all(since: Option<i64>) -> Result<(), CliError> {
+pub fn run_all() -> Result<(), CliError> {
     collect_run(None, None)?;
-    report_latest(since)
+    do_report(None)
 }
 
 pub fn config_doctor() -> Result<(), CliError> {
@@ -1238,25 +1253,57 @@ fn print_config(config: &OmensConfig) {
     );
 }
 
-pub fn report_latest(since: Option<i64>) -> Result<(), CliError> {
+/// Convert a Unix epoch timestamp to "YYYY-MM-DD" (UTC midnight only; time component ignored).
+fn epoch_to_date_str(ts: i64) -> String {
+    let jdn = ts / 86_400 + 2_440_588;
+    let l = jdn + 68_569;
+    let n = 4 * l / 146_097;
+    let l = l - (146_097 * n + 3) / 4;
+    let y = 4_000 * (l + 1) / 1_461_001;
+    let l = l - 1_461 * y / 4 + 31;
+    let m = 80 * l / 2_447;
+    let d = l - 2_447 * m / 80;
+    let l2 = m / 11;
+    let m = m + 2 - 12 * l2;
+    let y = 100 * (n - 49) + y + l2;
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+pub fn report_latest() -> Result<(), CliError> {
+    do_report(None)
+}
+
+pub fn report_since(since_ts: i64) -> Result<(), CliError> {
+    do_report(Some(since_ts))
+}
+
+fn do_report(since: Option<i64>) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
     let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
     store.migrate().map_err(CliError::fatal)?;
 
-    let run_id = match store.latest_run_id().map_err(CliError::fatal)? {
-        Some(id) => id,
-        None => {
-            println!("report latest: no runs found");
-            println!("  run `omens collect run --tickers TICKER` first");
-            return Ok(());
-        }
+    // In --since mode: cross-run query filtered by published_at.
+    // In default mode: signals from the latest collect run only.
+    let (run_id, all_signals): (Option<i64>, Vec<SignalWithItem>) = if let Some(ts) = since {
+        (None, store.signals_since(ts).map_err(CliError::fatal)?)
+    } else {
+        let id = match store.latest_run_id().map_err(CliError::fatal)? {
+            Some(id) => id,
+            None => {
+                println!("report latest: no runs found");
+                println!("  run `omens collect run --tickers TICKER` first");
+                return Ok(());
+            }
+        };
+        (
+            Some(id),
+            store
+                .signals_with_items_for_run(id)
+                .map_err(CliError::fatal)?,
+        )
     };
-
-    let all_signals = store
-        .signals_with_items_for_run(run_id)
-        .map_err(CliError::fatal)?;
 
     let high_impact = loaded.analysis.thresholds.high_impact;
 
@@ -1269,11 +1316,6 @@ pub fn report_latest(since: Option<i64>) -> Result<(), CliError> {
             _ => false,
         })
         .collect();
-
-    // Apply --since filter: keep signal if published_at >= since OR published_at IS NULL
-    if let Some(since_ts) = since {
-        filtered.retain(|s| s.published_at.is_none_or(|ts| ts >= since_ts));
-    }
 
     // Sort: severity rank desc, confidence desc, published_at desc
     filtered.sort_by(|a, b| {
@@ -1292,11 +1334,13 @@ pub fn report_latest(since: Option<i64>) -> Result<(), CliError> {
     });
 
     println!("report latest");
-    println!("  run_id: {run_id}");
-    println!("  total_signals: {}", all_signals.len());
-    if let Some(since_ts) = since {
-        println!("  since: {since_ts} (epoch)");
+    if let Some(id) = run_id {
+        println!("  run_id: {id}");
     }
+    if let Some(ts) = since {
+        println!("  since: {}", epoch_to_date_str(ts));
+    }
+    println!("  total_signals: {}", all_signals.len());
     println!(
         "  shown: {} (critical/high + medium >= {:.0}% confidence)",
         filtered.len(),
@@ -1335,22 +1379,14 @@ pub fn report_latest(since: Option<i64>) -> Result<(), CliError> {
     // Write reports/latest.json
     let json_path = loaded.resolved.reports_output_dir.join("latest.json");
     let json_str = build_report_json(run_id, generated_at, &all_signals, &filtered);
-    std::fs::write(&json_path, &json_str).map_err(|err| {
-        CliError::fatal(format!(
-            "failed writing {}: {err}",
-            json_path.display()
-        ))
-    })?;
+    std::fs::write(&json_path, &json_str)
+        .map_err(|err| CliError::fatal(format!("failed writing {}: {err}", json_path.display())))?;
 
     // Write reports/latest.md
     let md_path = loaded.resolved.reports_output_dir.join("latest.md");
     let md_str = build_report_md(run_id, generated_at, &all_signals, &filtered);
-    std::fs::write(&md_path, &md_str).map_err(|err| {
-        CliError::fatal(format!(
-            "failed writing {}: {err}",
-            md_path.display()
-        ))
-    })?;
+    std::fs::write(&md_path, &md_str)
+        .map_err(|err| CliError::fatal(format!("failed writing {}: {err}", md_path.display())))?;
 
     println!("\n  reports:");
     println!("    {}", json_path.display());
@@ -1370,7 +1406,7 @@ fn severity_rank(s: &str) -> u8 {
 }
 
 fn build_report_json(
-    run_id: i64,
+    run_id: Option<i64>,
     generated_at: i64,
     all_signals: &[SignalWithItem],
     filtered: &[&SignalWithItem],
@@ -1410,7 +1446,7 @@ fn build_report_json(
 }
 
 fn build_report_md(
-    run_id: i64,
+    run_id: Option<i64>,
     generated_at: i64,
     all_signals: &[SignalWithItem],
     filtered: &[&SignalWithItem],
@@ -1418,7 +1454,10 @@ fn build_report_md(
     use std::fmt::Write as _;
 
     let mut md = String::new();
-    let _ = writeln!(md, "# Omens Report — Run #{run_id}");
+    let run_label = run_id
+        .map(|id| format!("Run #{id}"))
+        .unwrap_or_else(|| "Cross-run query".to_string());
+    let _ = writeln!(md, "# Omens Report — {run_label}");
     let _ = writeln!(md);
     let _ = writeln!(md, "Generated at epoch: {generated_at}");
     let _ = writeln!(md);
@@ -1499,7 +1538,10 @@ mod tests {
     #[test]
     fn parse_date_br_with_timestamp() {
         // Dates like "29/12/2025 10:00:00" should strip the time and parse fine
-        assert_eq!(parse_date_br("29/12/2025 10:00:00"), parse_date_br("29/12/2025"));
+        assert_eq!(
+            parse_date_br("29/12/2025 10:00:00"),
+            parse_date_br("29/12/2025")
+        );
     }
 
     #[test]
