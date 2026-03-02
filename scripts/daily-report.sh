@@ -59,58 +59,64 @@ EOF
 
 ## Your task
 
-Investigate and report — do not escalate.
+Investigate and conclude — never escalate to the investor.
 
-For every HIGH or CRITICAL signal, exhaust the available data before writing a
-finding. If something looks anomalous, query the database to answer the question
-yourself. The investor reading this report wants conclusions, not a list of things
-to check manually. Do not write "verificar X" or "checar Y" unless you have
-already queried for X and Y and the data is genuinely absent from the DB.
+The investor reading this report wants **conclusions**, not a list of things to
+check. For every HIGH or CRITICAL signal, fully resolve it here using the tools
+available. Do not write "verificar X", "checar Y", or "consultar o comunicado"
+unless you have already done so and the answer is not there.
 
-**Investigation workflow for each notable signal:**
-1. Look up the raw payload: all scraped fields for that item across every run
-   (item_versions.payload_json). This is the ground truth.
-2. Check the full history for that ticker/section: how has the value changed
-   across runs? Is the current version consistent with prior ones?
-3. If a comunicado or relatório gerencial exists for that ticker in the DB,
-   fetch its full text and read it — it often directly answers "why did this change?":
-     ~/.local/bin/omens fetch-doc 'external_id:TICKER/comunicados/...' # use the stable_key
-   Results are cached in ~/.cache/omens/docs/ on first fetch.
-4. Only after exhausting the DB and any available documents should you write your finding.
+**Investigation workflow (follow in order for every HIGH/CRITICAL signal):**
 
-**Key queries:**
-  # All versions of an item (see how data changed across runs)
-  sqlite3 ~/.omens/db/omens.db "
-    SELECT r.id AS run, iv.payload_json
-    FROM item_versions iv
-    JOIN items i ON iv.item_id = i.id
-    JOIN runs r ON iv.run_id = r.id
-    WHERE i.stable_key = 'external_id:TICKER/section/key'
-    ORDER BY r.id"
+1. **Payload history** — look up all scraped versions of the item to understand
+   what exactly changed and when:
+     sqlite3 ~/.omens/db/omens.db "
+       SELECT r.id AS run, iv.payload_json
+       FROM item_versions iv
+       JOIN items i ON iv.item_id = i.id
+       JOIN runs r ON iv.run_id = r.id
+       WHERE i.stable_key = 'external_id:TICKER/section/key'
+       ORDER BY r.id"
 
-  # All items for a ticker in a section (find related comunicados, etc.)
-  sqlite3 ~/.omens/db/omens.db "
-    SELECT i.stable_key, iv.payload_json
-    FROM items i JOIN item_versions iv ON iv.item_id = i.id
-    WHERE i.external_id LIKE '%TICKER/comunicados%'
-    ORDER BY i.published_at DESC LIMIT 10"
+2. **Historical context** — compare with prior values for the same ticker/section:
+     sqlite3 ~/.omens/db/omens.db "
+       SELECT r.id AS run, s.severity, s.confidence, s.summary
+       FROM signals s
+       JOIN items i ON s.item_id = i.id
+       JOIN runs r ON s.run_id = r.id
+       WHERE i.external_id LIKE '%TICKER%'
+       ORDER BY r.id"
 
-  # Cross-run signals for a ticker (see what the system flagged and when)
-  sqlite3 ~/.omens/db/omens.db "
-    SELECT r.id AS run, s.severity, s.summary
-    FROM signals s JOIN items i ON s.item_id = i.id JOIN runs r ON s.run_id = r.id
-    WHERE i.external_id LIKE '%TICKER%'
-    ORDER BY r.id"
+3. **Fetch the document** — for every HIGH/CRITICAL comunicado signal, and for
+   every proventos signal where the reason isn't obvious, fetch the full text of
+   the related comunicado. This is mandatory, not optional.
 
-  ~/.local/bin/omens report since 7d    # compact view of recent signals
-  ~/.local/bin/omens report since 30d   # broader context
-  ~/.local/bin/omens fetch-doc 'external_id:TICKER/comunicados/...'  # fetch full document text
+   Step 3a — find the right stable_key:
+     sqlite3 ~/.omens/db/omens.db "
+       SELECT i.stable_key, i.published_at, iv.payload_json
+       FROM items i JOIN item_versions iv ON iv.item_id = i.id
+       WHERE i.external_id LIKE '%TICKER/comunicados%'
+       ORDER BY i.published_at DESC LIMIT 10"
+
+   Step 3b — fetch the document (takes the stable_key exactly as it appears):
+     ~/.local/bin/omens fetch-doc 'external_id:TICKER/comunicados/...'
+
+   fetch-doc outputs the full document text (PDF converted to plain text, or HTML
+   stripped). Results are cached — subsequent calls for the same document are
+   instant. The display session is already running.
+
+4. **Write your finding** — only after steps 1–3. If after fetching the document
+   something is still unclear, say exactly what is missing and why it could not
+   be resolved.
+
+**Additional queries:**
+  ~/.local/bin/omens report since 7d    # compact cross-run signal view
+  ~/.local/bin/omens report since 30d   # broader historical context
 
 **Output:** Escreva em português (pt-BR). Relatório conciso em Markdown cobrindo:
-- O que aconteceu de fato (não apenas o rótulo do sinal)
-- Quais tickers merecem atenção e por quê — com sua conclusão, não dúvidas abertas
-- Se após esgotar os dados algo ainda é inconclusivo, diga explicitamente o que
-  está faltando no banco e por que não foi possível resolver
+- O que aconteceu de fato (com base nos dados e no texto do documento, não no rótulo do sinal)
+- Para cada ticker com sinal HIGH/CRITICAL: sua conclusão objetiva sobre o que fazer ou monitorar
+- Se algo genuinamente não pôde ser resolvido: o que falta e por quê
 
 ## Database schema
 
@@ -137,7 +143,7 @@ bwrap \
     --dev /dev \
     --tmpfs /tmp \
     --bind "$HOME/.claude" "$HOME/.claude" \
-    --bind "$HOME/.omens/db" "$HOME/.omens/db" \
+    --bind "$HOME/.omens" "$HOME/.omens" \
     --bind "$HOME/.cache/omens" "$HOME/.cache/omens" \
     -- \
     env -u CLAUDECODE \
