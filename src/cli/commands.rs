@@ -535,12 +535,35 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
                 .map(|r| analyze::AnalysisItem {
                     item_id: r.item_id,
                     section: r.section,
+                    external_id: r.external_id,
                     stable_key: r.stable_key,
                     payload_json: r.payload_json,
                     is_new: r.version_count == 1,
                 })
                 .collect();
-            let signals = analyze::analyze_items(&analysis_items, &loaded.analysis);
+
+            // Build provento history for context-aware scoring (one DB query per ticker).
+            let mut history_map: std::collections::HashMap<
+                String,
+                Vec<analyze::HistoricalProvento>,
+            > = std::collections::HashMap::new();
+            for item in &analysis_items {
+                if item.section == "proventos" {
+                    let ticker = item.external_id.split('/').next().unwrap_or("");
+                    if !ticker.is_empty() && !history_map.contains_key(ticker) {
+                        let payloads = store
+                            .recent_proventos_for_ticker(ticker, run_id)
+                            .map_err(CliError::fatal)?;
+                        let history = payloads
+                            .iter()
+                            .map(|p| analyze::HistoricalProvento::from_payload(p))
+                            .collect();
+                        history_map.insert(ticker.to_string(), history);
+                    }
+                }
+            }
+
+            let signals = analyze::analyze_items(&analysis_items, &history_map, &loaded.analysis);
             for sig in &signals {
                 store
                     .insert_signal(

@@ -116,6 +116,7 @@ pub struct RetentionPlan {
 pub struct ItemVersionForAnalysis {
     pub item_id: i64,
     pub section: String,
+    pub external_id: String,
     pub stable_key: String,
     pub payload_json: String,
     pub version_count: i64, // 1 = new item, >1 = changed item
@@ -602,7 +603,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT i.id, i.section, i.stable_key, iv.payload_json,
+                "SELECT i.id, i.section, COALESCE(i.external_id, ''), i.stable_key, iv.payload_json,
                         (SELECT COUNT(*) FROM item_versions WHERE item_id = i.id) AS version_count
                  FROM item_versions iv
                  JOIN items i ON i.id = iv.item_id
@@ -615,9 +616,10 @@ impl Store {
                 Ok(ItemVersionForAnalysis {
                     item_id: row.get(0)?,
                     section: row.get(1)?,
-                    stable_key: row.get(2)?,
-                    payload_json: row.get(3)?,
-                    version_count: row.get(4)?,
+                    external_id: row.get(2)?,
+                    stable_key: row.get(3)?,
+                    payload_json: row.get(4)?,
+                    version_count: row.get(5)?,
                 })
             })
             .map_err(|err| format!("failed querying items_for_analysis: {err}"))?;
@@ -625,6 +627,41 @@ impl Store {
         let mut result = Vec::new();
         for row in rows {
             result.push(row.map_err(|err| format!("failed reading analysis row: {err}"))?);
+        }
+        Ok(result)
+    }
+
+    /// Return the most recent provento payload_json values for a ticker, from runs before
+    /// `before_run_id`, ordered most-recent-first. Used to provide history context for scoring.
+    pub fn recent_proventos_for_ticker(
+        &self,
+        ticker: &str,
+        before_run_id: i64,
+    ) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT iv.payload_json
+                 FROM items i
+                 JOIN item_versions iv ON iv.item_id = i.id
+                   AND iv.id = (
+                     SELECT MAX(iv2.id) FROM item_versions iv2
+                     WHERE iv2.item_id = i.id AND iv2.run_id < ?2
+                   )
+                 WHERE i.section = 'proventos'
+                   AND i.external_id LIKE ?1 || '/%'
+                 ORDER BY i.published_at DESC, i.id DESC
+                 LIMIT 6",
+            )
+            .map_err(|err| format!("failed preparing recent_proventos query: {err}"))?;
+
+        let rows = stmt
+            .query_map(params![ticker, before_run_id], |row| row.get(0))
+            .map_err(|err| format!("failed querying recent_proventos: {err}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|err| format!("failed reading provento row: {err}"))?);
         }
         Ok(result)
     }
