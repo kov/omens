@@ -6,7 +6,8 @@
 
 ```bash
 cargo run -- collect run --tickers BRCR11
-cargo run -- report latest
+cargo run -- report latest          # signals from the most recent run
+cargo run -- report since 30d       # cross-run: signals with published_at in last 30 days
 # etc.
 ```
 

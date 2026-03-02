@@ -22,7 +22,8 @@ All commands below assume this prefix.
 
 ```bash
 cargo run -- collect run --tickers BRCR11
-cargo run -- report latest
+cargo run -- report latest          # signals from this run
+cargo run -- report since 30d       # or: all signals from the last 30 days
 ```
 
 If the display isn't running yet:
@@ -192,13 +193,18 @@ Signals:
 
 ### Step 3 — Report
 
-Print and write the latest run's signals:
+Two report subcommands, serving different purposes:
 
 ```bash
-cargo run -- report latest
+cargo run -- report latest          # signals from the most recent collect run
+cargo run -- report since 30d       # cross-run: items with published_at in last 30 days
+cargo run -- report since 2025-01-01  # same with an absolute date
 ```
 
-Output:
+#### `report latest`
+
+Shows signals produced by the **most recent `collect run`** — i.e. what changed
+or appeared since the previous collection. Use this right after collecting.
 
 ```
 report latest
@@ -218,7 +224,28 @@ report latest
     /home/user/.omens/reports/latest.md
 ```
 
-Display filter:
+#### `report since DATE|Nd`
+
+Cross-run query: returns the most recent signal **per item** where the item's
+`published_at` falls within the requested window, across **all** collect runs.
+Use this to review what happened over a time period regardless of when you ran
+collection.
+
+```
+report latest
+  since: 2026-01-31
+  total_signals: 21
+  shown: 11 (critical/high + medium >= 80% confidence)
+
+--- HIGH ---
+  ...
+```
+
+Items without a `published_at` date (e.g. `cotacoes`) are excluded from
+`report since` results.
+
+#### Display filter (both subcommands)
+
 - **critical / high**: always shown
 - **medium**: shown only if `confidence >= high_impact` (default 0.8)
 - **low / ignore**: never shown in terminal output
@@ -339,8 +366,8 @@ cargo run -- explore promote <id_for_cotacoes>
 # 6. Full pipeline run across all configured tickers
 cargo run -- run
 
-# 7. Filter to recent signals (last 30 days)
-cargo run -- report latest --since 30d
+# 7. Review signals from the last 30 days (cross-run)
+cargo run -- report since 30d
 ```
 
 ## Adding a new ticker
