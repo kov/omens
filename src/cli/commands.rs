@@ -664,6 +664,25 @@ fn do_collect(
     };
     let mut first = true;
 
+    // Load active recipes once — they are global (not per-ticker)
+    let all_recipes = store.list_recipes(None)?;
+    let active_recipes: Vec<_> = all_recipes
+        .iter()
+        .filter(|r| r.status == RecipeStatus::Active)
+        .filter(|r| {
+            section_filter
+                .map(|f| f.iter().any(|s| s == &r.section))
+                .unwrap_or(true)
+        })
+        .collect();
+
+    if active_recipes.is_empty() {
+        println!(
+            "  no active recipes found; run `omens explore` then `omens explore promote <id>`"
+        );
+        return Ok(stats);
+    }
+
     for ticker in tickers {
         let fund_url = format!("{base_url}/fiis/{ticker}");
         println!("collect: navigating to {fund_url}");
@@ -677,26 +696,6 @@ fn do_collect(
         std::thread::sleep(std::time::Duration::from_secs(3));
         harness.dismiss_overlays();
 
-        // Load active recipes filtered by section_filter
-        let all_recipes = store.list_recipes(None)?;
-        let active_recipes: Vec<_> = all_recipes
-            .iter()
-            .filter(|r| r.status == RecipeStatus::Active)
-            .filter(|r| {
-                section_filter
-                    .map(|f| f.iter().any(|s| s == &r.section))
-                    .unwrap_or(true)
-            })
-            .collect();
-
-        if active_recipes.is_empty() {
-            println!(
-                "  [{ticker}] no active recipes found; run `omens explore start {ticker}` \
-                 then `omens explore promote <id>`"
-            );
-            continue;
-        }
-
         for recipe in &active_recipes {
             let section = &recipe.section;
             println!("  [{ticker}/{section}] extracting...");
@@ -704,9 +703,9 @@ fn do_collect(
             // Click the tab anchor
             let click_sel = format!("a[href='#{section}']");
             if let Err(e) = harness.click_and_wait(&click_sel, 10_000) {
+                // Tab click failures are often transient (timing, browser state);
+                // skip this section for this ticker without permanently degrading.
                 println!("    skip: tab click failed: {e}");
-                let now = store::now_epoch_seconds()?;
-                let _ = store.update_recipe_status(recipe.id, RecipeStatus::Degraded, now);
                 continue;
             }
 
@@ -1361,7 +1360,6 @@ fn do_report(since: Option<i64>) -> Result<(), CliError> {
                 sig.confidence,
                 sig.summary
             );
-            println!("    section: {} | key: {}", sig.section, sig.stable_key);
             if let Some(url) = &sig.url {
                 println!("    url: {url}");
             }
@@ -1445,6 +1443,42 @@ fn build_report_json(
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Extract the ticker from a stable_key of the form `external_id:TICKER/section/...`.
+fn ticker_from_stable_key(stable_key: &str) -> &str {
+    let rest = stable_key
+        .strip_prefix("external_id:")
+        .unwrap_or(stable_key);
+    rest.split('/').next().unwrap_or(stable_key)
+}
+
+/// Strip boilerplate from a signal summary, returning just the human-readable content.
+///
+/// Input forms:
+///   "new announcement: external_id:TICKER/SECTION/TYPE|DESCRIPTION"
+///   "new announcement: external_id:TICKER/SECTION/N/DTITLE"
+///   "new dividend: external_id:TICKER/proventos/MM/YYYY valor=X"
+///
+/// Output: the meaningful trailing content (after `|` when present, or after `N/D`).
+fn compact_summary(summary: &str) -> &str {
+    // Strip leading verb and "external_id:" prefix
+    let rest = summary
+        .split_once("external_id:")
+        .map(|(_, r)| r)
+        .unwrap_or(summary);
+
+    // Skip TICKER and SECTION (first two '/'-delimited segments), keep the rest.
+    // Use splitn(3) so that '/' inside TYPE/DESCRIPTION is not consumed.
+    let content = rest.splitn(3, '/').nth(2).unwrap_or(rest);
+
+    // Prefer the part after '|' (the human-readable description).
+    // For N/D items there is no '|'; strip the literal "N/D" marker instead.
+    if let Some(idx) = content.find('|') {
+        &content[idx + 1..]
+    } else {
+        content.strip_prefix("N/D").unwrap_or(content)
+    }
+}
+
 fn build_report_md(
     run_id: Option<i64>,
     generated_at: i64,
@@ -1455,55 +1489,59 @@ fn build_report_md(
 
     let mut md = String::new();
     let run_label = run_id
-        .map(|id| format!("Run #{id}"))
-        .unwrap_or_else(|| "Cross-run query".to_string());
-    let _ = writeln!(md, "# Omens Report — {run_label}");
-    let _ = writeln!(md);
-    let _ = writeln!(md, "Generated at epoch: {generated_at}");
-    let _ = writeln!(md);
+        .map(|id| format!("run-{id}"))
+        .unwrap_or_else(|| "cross-run".to_string());
     let _ = writeln!(
         md,
-        "## Signals ({} shown / {} total)",
+        "# omens {run_label} · epoch:{generated_at} · {}/{} signals shown",
         filtered.len(),
         all_signals.len()
     );
 
     if filtered.is_empty() {
-        let _ = writeln!(md);
-        let _ = writeln!(md, "_No signals to display._");
+        let _ = writeln!(md, "\n_No signals._");
         return md;
     }
 
-    let mut current_severity = String::new();
+    // Group by ticker preserving the existing severity-sorted order.
+    let mut groups: Vec<(&str, Vec<&SignalWithItem>)> = Vec::new();
     for sig in filtered {
-        if sig.severity != current_severity {
-            current_severity = sig.severity.clone();
-            let _ = writeln!(md);
-            let _ = writeln!(md, "### {}", current_severity.to_uppercase());
+        let ticker = ticker_from_stable_key(&sig.stable_key);
+        if let Some(g) = groups.iter_mut().find(|(t, _)| *t == ticker) {
+            g.1.push(sig);
+        } else {
+            groups.push((ticker, vec![sig]));
         }
-        let reasons: Vec<String> = sig
-            .reasons_json
-            .as_deref()
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
+    }
 
-        let _ = writeln!(
-            md,
-            "- **[{} {:.2}]** {}",
-            sig.severity.to_uppercase(),
-            sig.confidence,
-            sig.summary
-        );
-        let _ = writeln!(
-            md,
-            "  - Section: `{}` | Key: `{}`",
-            sig.section, sig.stable_key
-        );
-        if let Some(url) = &sig.url {
-            let _ = writeln!(md, "  - URL: {url}");
-        }
-        if !reasons.is_empty() {
-            let _ = writeln!(md, "  - Reasons: {}", reasons.join("; "));
+    for (ticker, sigs) in &groups {
+        let _ = writeln!(md, "\n## {ticker}");
+        for sig in sigs {
+            let sev = match sig.severity.as_str() {
+                "critical" => "CRIT",
+                "high" => "H",
+                "medium" => "M",
+                "low" => "L",
+                s => s,
+            };
+            let desc = compact_summary(&sig.summary);
+            let reasons: Vec<String> = sig
+                .reasons_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default();
+            if reasons.is_empty() {
+                let _ = writeln!(md, "- {sev} {:.2} {} {}", sig.confidence, sig.section, desc);
+            } else {
+                let _ = writeln!(
+                    md,
+                    "- {sev} {:.2} {} {} _{}_",
+                    sig.confidence,
+                    sig.section,
+                    desc,
+                    reasons.join("; ")
+                );
+            }
         }
     }
 
@@ -1519,7 +1557,8 @@ pub fn map_auth_error(err: AuthError) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_published_at, parse_date_br, parse_since};
+    use super::{build_report_md, extract_published_at, parse_date_br, parse_since};
+    use crate::store::SignalWithItem;
 
     // 2023-08-31 00:00:00 UTC
     const AUG31_2023: i64 = 1693440000;
@@ -1603,5 +1642,96 @@ mod tests {
         assert!(parse_since("bad").is_err());
         assert!(parse_since("2023-08").is_err());
         assert!(parse_since("xd").is_err());
+    }
+
+    // Regression: report markdown must not include a redundant Key/Section line —
+    // the summary already embeds the full stable_key, so repeating it wastes tokens.
+    #[test]
+    fn report_md_grouped_by_ticker_compact() {
+        let make_sig = |ticker: &str, summary: &str| SignalWithItem {
+            signal_id: 1,
+            run_id: 1,
+            kind: "new_announcement".into(),
+            severity: "high".into(),
+            confidence: 0.9,
+            reasons_json: Some(r#"["contains 'fato relevante'"]"#.into()),
+            summary: summary.into(),
+            item_id: 1,
+            section: "comunicados".into(),
+            stable_key: format!("external_id:{ticker}/comunicados/Fato Relevante"),
+            title: None,
+            url: Some(format!(
+                "https://www.clubefii.com.br/fiis/{ticker}#comunicados"
+            )),
+            published_at: None,
+        };
+
+        let a = make_sig(
+            "BRCO11",
+            "new announcement: external_id:BRCO11/comunicados/Fato Relevante|Expansão",
+        );
+        let b = make_sig(
+            "HGLG11",
+            "new announcement: external_id:HGLG11/comunicados/Fato Relevante|11ª emissão",
+        );
+
+        let all = [a.clone(), b.clone()];
+        let filtered: Vec<&SignalWithItem> = all.iter().collect();
+        let md = build_report_md(Some(1), 0, &all, &filtered);
+
+        // Grouped by ticker
+        assert!(md.contains("## BRCO11"), "should have BRCO11 section");
+        assert!(md.contains("## HGLG11"), "should have HGLG11 section");
+
+        // Human-readable description present, boilerplate absent
+        assert!(md.contains("Expansão"), "description should appear");
+        assert!(
+            md.contains("11ª emissão"),
+            "second description should appear"
+        );
+        assert!(
+            !md.contains("external_id:"),
+            "internal id prefix must not appear"
+        );
+        assert!(
+            !md.contains("Key:") && !md.contains("Section:"),
+            "redundant key/section lines must not appear"
+        );
+
+        // Reasons present
+        assert!(md.contains("fato relevante"), "reasons should appear");
+    }
+
+    #[test]
+    fn compact_summary_strips_boilerplate() {
+        use super::compact_summary;
+
+        // Announcement with pipe-separated description
+        assert_eq!(
+            compact_summary(
+                "new announcement: external_id:BRCO11/comunicados/Fato Relevante|Expansão de locação"
+            ),
+            "Expansão de locação"
+        );
+
+        // N/D item (no pipe, bare title after N/D marker)
+        assert_eq!(
+            compact_summary(
+                "new announcement: external_id:BODB11/comunicados/N/DRelatório Gerencial - Janeiro/2026"
+            ),
+            "Relatório Gerencial - Janeiro/2026"
+        );
+
+        // Dividend
+        assert_eq!(
+            compact_summary("new dividend: external_id:GTWR11/proventos/12/2025 valor=0,900"),
+            "12/2025 valor=0,900"
+        );
+
+        // Unknown format — returned as-is
+        assert_eq!(
+            compact_summary("some unknown format"),
+            "some unknown format"
+        );
     }
 }

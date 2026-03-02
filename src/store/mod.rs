@@ -1481,4 +1481,50 @@ mod tests {
         let recipes = store.list_recipes(Some("news")).expect("list");
         assert_eq!(recipes[0].status, RecipeStatus::Degraded);
     }
+
+    // Regression: collect loop must skip all tickers when no active recipes exist,
+    // not emit a per-ticker error. The store side of this: a degraded recipe must
+    // not appear in the active-filtered list used to gate the loop.
+    #[test]
+    fn degraded_recipe_excluded_from_active_list() {
+        let root = unique_temp_dir("recipe-active-filter");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let id = store
+            .insert_recipe("comunicados", "v1", None, "{}", None, 100)
+            .expect("insert");
+        store.promote_recipe(id, 200).expect("promote");
+
+        // Before degrading: one active recipe
+        let before: Vec<_> = store
+            .list_recipes(None)
+            .expect("list")
+            .into_iter()
+            .filter(|r| r.status == RecipeStatus::Active)
+            .collect();
+        assert_eq!(
+            before.len(),
+            1,
+            "expected one active recipe before degrading"
+        );
+
+        // Simulate what used to happen on a tab-click failure
+        store
+            .update_recipe_status(id, RecipeStatus::Degraded, 300)
+            .expect("degrade");
+
+        // After degrading: active list is empty — collect loop exits early
+        let after: Vec<_> = store
+            .list_recipes(None)
+            .expect("list")
+            .into_iter()
+            .filter(|r| r.status == RecipeStatus::Active)
+            .collect();
+        assert!(
+            after.is_empty(),
+            "degraded recipe must not appear in the active list used by the collect loop"
+        );
+    }
 }
