@@ -238,6 +238,18 @@ mod tests {
         fn find_row_link_by_text(&self, _search_text: &str) -> Result<Option<String>, String> {
             Ok(None)
         }
+
+        fn type_text(&self, _selector: &str, _text: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn scroll(&self, _direction: &str, _pixels: u32) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn evaluate_js(&self, _expression: &str) -> Result<String, String> {
+            Ok("null".to_string())
+        }
     }
 
     fn base_config() -> AuthValidationConfig {

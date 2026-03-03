@@ -41,6 +41,12 @@ pub trait BrowserHarness {
     /// Find the href of the first link in a table row whose text contains `search_text`.
     /// Also looks for onclick-embedded URLs (window.open patterns).
     fn find_row_link_by_text(&self, search_text: &str) -> Result<Option<String>, String>;
+    /// Focus an element and type text into it.
+    fn type_text(&self, selector: &str, text: &str) -> Result<(), String>;
+    /// Scroll the page up or down by the given number of pixels.
+    fn scroll(&self, direction: &str, pixels: u32) -> Result<(), String>;
+    /// Evaluate a raw JS expression and return the JSON-stringified result.
+    fn evaluate_js(&self, expression: &str) -> Result<String, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -745,6 +751,63 @@ impl BrowserHarness for ChromiumoxideHarness {
             .into_value()
             .unwrap_or(None);
         Ok(result)
+    }
+
+    fn type_text(&self, selector: &str, text: &str) -> Result<(), String> {
+        let page = self.page()?.clone();
+        let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
+        let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+        let js = format!(
+            r#"(function() {{
+                var el = document.querySelector({sel_json});
+                if (!el) throw new Error('element not found: ' + {sel_json});
+                el.focus();
+                el.value = {text_json};
+                el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return true;
+            }})()"#
+        );
+        self.runtime
+            .block_on(async {
+                page.evaluate(js)
+                    .await
+                    .map_err(|e| format!("type_text failed: {e}"))
+            })
+            .map(|_| ())
+    }
+
+    fn scroll(&self, direction: &str, pixels: u32) -> Result<(), String> {
+        let page = self.page()?.clone();
+        let dy = match direction {
+            "up" => -(pixels as i64),
+            "down" => pixels as i64,
+            _ => return Err(format!("invalid scroll direction: {direction}")),
+        };
+        let js = format!("window.scrollBy(0, {dy})");
+        self.runtime
+            .block_on(async {
+                page.evaluate(js)
+                    .await
+                    .map_err(|e| format!("scroll failed: {e}"))
+            })
+            .map(|_| ())
+    }
+
+    fn evaluate_js(&self, expression: &str) -> Result<String, String> {
+        let page = self.page()?.clone();
+        let expr = expression.to_string();
+        self.runtime.block_on(async {
+            let result = page
+                .evaluate(format!("JSON.stringify({expr})"))
+                .await
+                .map_err(|e| format!("evaluate_js failed: {e}"))?;
+            let value: serde_json::Value = result.into_value().unwrap_or(serde_json::Value::Null);
+            match value {
+                serde_json::Value::String(s) => Ok(s),
+                other => Ok(other.to_string()),
+            }
+        })
     }
 
     fn find_row_link_by_text(&self, search_text: &str) -> Result<Option<String>, String> {

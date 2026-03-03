@@ -1241,6 +1241,66 @@ pub fn send_email(path: String) -> Result<(), CliError> {
     Ok(())
 }
 
+pub fn chat(display: bool) -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    if !loaded.chat.enabled {
+        return Err(CliError::fatal(
+            "chat is disabled; set chat.enabled = true in config",
+        ));
+    }
+    if loaded.chat.model.is_empty() {
+        return Err(CliError::fatal(
+            "chat.model is empty; set a model name in config",
+        ));
+    }
+
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
+
+    let profile_path = manager.default_profile_dir().to_path_buf();
+    std::fs::create_dir_all(&profile_path).map_err(|err| {
+        CliError::fatal(format!(
+            "failed to create browser profile {}: {err}",
+            profile_path.display()
+        ))
+    })?;
+
+    let mut launch_env = Vec::<(String, String)>::new();
+    if display {
+        let dm = DisplayManager::new(&loaded.resolved.root_dir);
+        let status = dm.status().map_err(CliError::fatal)?;
+        let session = status.session.ok_or_else(|| {
+            CliError::fatal("display session is not running; run `omens display start`")
+        })?;
+        launch_env.push((
+            "XDG_RUNTIME_DIR".to_string(),
+            session.runtime_dir.display().to_string(),
+        ));
+        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+    } else {
+        let dm = DisplayManager::new(&loaded.resolved.root_dir);
+        if let Ok(status) = dm.status()
+            && let Some(session) = status.session
+        {
+            launch_env.push((
+                "XDG_RUNTIME_DIR".to_string(),
+                session.runtime_dir.display().to_string(),
+            ));
+            launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+        }
+    }
+
+    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
+        .map_err(CliError::fatal)?;
+    harness.launch("about:blank").map_err(CliError::fatal)?;
+
+    let result = crate::chat::run_chat_loop(&mut harness, &loaded.chat);
+    let _ = harness.shutdown();
+    result.map_err(CliError::fatal)
+}
+
 pub fn config_doctor() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;

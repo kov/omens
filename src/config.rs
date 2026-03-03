@@ -44,6 +44,12 @@ mod defaults {
     pub fn smtp_port() -> u16 {
         587
     }
+    pub fn chat_base_url() -> String {
+        "http://127.0.0.1:1234/v1".to_string()
+    }
+    pub fn chat_max_page_chars() -> u32 {
+        16000
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -64,6 +70,8 @@ pub struct OmensConfig {
     pub reports: ReportsConfig,
     #[serde(default)]
     pub email: EmailConfig,
+    #[serde(default)]
+    pub chat: ChatConfig,
     #[serde(skip)]
     pub resolved: ResolvedPaths,
 }
@@ -96,6 +104,32 @@ impl Default for EmailConfig {
             smtp_password: String::new(),
             from: String::new(),
             to: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "defaults::chat_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "defaults::chat_max_page_chars")]
+    pub max_page_chars: u32,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: defaults::chat_base_url(),
+            api_key: String::new(),
+            model: String::new(),
+            max_page_chars: defaults::chat_max_page_chars(),
         }
     }
 }

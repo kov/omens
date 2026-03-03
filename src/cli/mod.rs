@@ -64,6 +64,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::DisplayStatus => commands::display_status(),
         Command::FetchDoc { url_or_key } => commands::fetch_doc(url_or_key),
         Command::SendEmail { path } => commands::send_email(path),
+        Command::Chat { display } => commands::chat(display),
         Command::ConfigDoctor => commands::config_doctor(),
         Command::Help { topic } => {
             print_usage(topic);
@@ -87,6 +88,7 @@ fn print_usage(topic: HelpTopic) {
   omens report since DATE|Nd\n  \
   omens fetch-doc <url-or-stable-key>\n  \
   omens send-email <file>\n  \
+  omens chat [--display]\n  \
   omens config doctor\n  \
   omens browser open [url] [--display]\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
@@ -105,6 +107,7 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Report => {
             println!("Usage:\n  omens report latest\n  omens report since DATE|Nd")
         }
+        HelpTopic::Chat => println!("Usage:\n  omens chat [--display]"),
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
         HelpTopic::Browser => {
             println!(
@@ -124,6 +127,7 @@ enum HelpTopic {
     Explore,
     Collect,
     Report,
+    Chat,
     Config,
     Browser,
     Display,
@@ -155,6 +159,9 @@ enum Command {
     },
     SendEmail {
         path: String,
+    },
+    Chat {
+        display: bool,
     },
     ConfigDoctor,
     BrowserStatus,
@@ -211,6 +218,7 @@ impl Command {
             "report" => parse_report(args),
             "fetch-doc" => parse_fetch_doc(args),
             "send-email" => parse_send_email(args),
+            "chat" => parse_chat(args),
             "config" => parse_config(args),
             "browser" => parse_browser(args),
             "display" => parse_display(args),
@@ -226,6 +234,7 @@ fn parse_help_topic(raw: Option<&str>) -> Result<HelpTopic, String> {
         Some("explore") => Ok(HelpTopic::Explore),
         Some("collect") => Ok(HelpTopic::Collect),
         Some("report") => Ok(HelpTopic::Report),
+        Some("chat") => Ok(HelpTopic::Chat),
         Some("config") => Ok(HelpTopic::Config),
         Some("browser") => Ok(HelpTopic::Browser),
         Some("display") => Ok(HelpTopic::Display),
@@ -364,6 +373,22 @@ fn parse_send_email(args: &[String]) -> Result<Command, String> {
         }),
         None => Err("usage: omens send-email <file>".to_string()),
     }
+}
+
+fn parse_chat(args: &[String]) -> Result<Command, String> {
+    if args.len() == 3 && is_help(args[2].as_str()) {
+        return Ok(Command::Help {
+            topic: HelpTopic::Chat,
+        });
+    }
+    let mut display = false;
+    for arg in args.iter().skip(2) {
+        match arg.as_str() {
+            "--display" => display = true,
+            _ => return Err("usage: omens chat [--display]".to_string()),
+        }
+    }
+    Ok(Command::Chat { display })
 }
 
 fn parse_config(args: &[String]) -> Result<Command, String> {
