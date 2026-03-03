@@ -57,6 +57,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::BrowserInstall { force } => commands::browser_install(force),
         Command::BrowserUpgrade => commands::browser_upgrade(),
         Command::BrowserRollback => commands::browser_rollback(),
+        Command::BrowserOpen { url, display } => commands::browser_open(url, display),
         Command::BrowserResetProfile => commands::browser_reset_profile(),
         Command::DisplayStart { listen_addr } => commands::display_start(listen_addr),
         Command::DisplayStop => commands::display_stop(),
@@ -87,6 +88,7 @@ fn print_usage(topic: HelpTopic) {
   omens fetch-doc <url-or-stable-key>\n  \
   omens send-email <file>\n  \
   omens config doctor\n  \
+  omens browser open [url] [--display]\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
   omens display start|stop|status"
             );
@@ -106,7 +108,7 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
         HelpTopic::Browser => {
             println!(
-                "Usage:\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
+                "Usage:\n  omens browser open [url] [--display]\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
             )
         }
         HelpTopic::Display => println!(
@@ -161,6 +163,10 @@ enum Command {
     },
     BrowserUpgrade,
     BrowserRollback,
+    BrowserOpen {
+        url: Option<String>,
+        display: bool,
+    },
     BrowserResetProfile,
     DisplayStart {
         listen_addr: String,
@@ -377,6 +383,19 @@ fn parse_browser(args: &[String]) -> Result<Command, String> {
         return Ok(Command::Help {
             topic: HelpTopic::Browser,
         });
+    }
+
+    if args.len() >= 3 && args[2] == "open" {
+        let mut url = None;
+        let mut display = false;
+        for arg in args.iter().skip(3) {
+            match arg.as_str() {
+                "--display" => display = true,
+                _ if url.is_none() && !arg.starts_with('-') => url = Some(arg.clone()),
+                _ => return Err("usage: omens browser open [url] [--display]".to_string()),
+            }
+        }
+        return Ok(Command::BrowserOpen { url, display });
     }
 
     if args.len() >= 3 && args[2] == "install" {
@@ -621,6 +640,66 @@ mod tests {
 
         let auth = Command::parse(&to_args(&["omens", "auth", "bootstrap", "bad"]));
         assert!(auth.is_err());
+    }
+
+    #[test]
+    fn parse_browser_open_no_args() {
+        assert!(matches!(
+            Command::parse(&to_args(&["omens", "browser", "open"])).expect("should parse"),
+            Command::BrowserOpen {
+                url: None,
+                display: false
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_browser_open_with_url() {
+        let cmd = Command::parse(&to_args(&[
+            "omens",
+            "browser",
+            "open",
+            "https://example.com",
+        ]))
+        .expect("should parse");
+        match cmd {
+            Command::BrowserOpen { url, display } => {
+                assert_eq!(url, Some("https://example.com".to_string()));
+                assert!(!display);
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_open_with_display() {
+        assert!(matches!(
+            Command::parse(&to_args(&["omens", "browser", "open", "--display"]))
+                .expect("should parse"),
+            Command::BrowserOpen {
+                url: None,
+                display: true
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_browser_open_url_and_display() {
+        let cmd = Command::parse(&to_args(&[
+            "omens",
+            "browser",
+            "open",
+            "https://example.com",
+            "--display",
+        ]))
+        .expect("should parse");
+        match cmd {
+            Command::BrowserOpen { url, display } => {
+                assert_eq!(url, Some("https://example.com".to_string()));
+                assert!(display);
+            }
+            _ => panic!("unexpected variant"),
+        }
     }
 
     #[test]

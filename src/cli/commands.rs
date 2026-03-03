@@ -122,6 +122,54 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+pub fn browser_open(url: Option<String>, display: bool) -> Result<(), CliError> {
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
+
+    let profile_path = manager.default_profile_dir().to_path_buf();
+    std::fs::create_dir_all(&profile_path).map_err(|err| {
+        CliError::fatal(format!(
+            "failed to create browser profile {}: {err}",
+            profile_path.display()
+        ))
+    })?;
+
+    let mut launch_env = Vec::<(String, String)>::new();
+    if display {
+        let dm = DisplayManager::new(&loaded.resolved.root_dir);
+        let status = dm.status().map_err(CliError::fatal)?;
+        let session = status.session.ok_or_else(|| {
+            CliError::fatal("display session is not running; run `omens display start`")
+        })?;
+        launch_env.push((
+            "XDG_RUNTIME_DIR".to_string(),
+            session.runtime_dir.display().to_string(),
+        ));
+        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+    }
+
+    let target = url.as_deref().unwrap_or("chrome://newtab");
+
+    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path.clone(), launch_env)
+        .map_err(CliError::fatal)?;
+    harness.launch(target).map_err(CliError::fatal)?;
+
+    println!("browser open");
+    println!("  url: {target}");
+    println!("  profile: {}", profile_path.display());
+    println!("  press Enter to close the browser.");
+
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|err| CliError::fatal(format!("failed reading input: {err}")))?;
+
+    Ok(())
+}
+
 pub fn explore_start(url: String) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
