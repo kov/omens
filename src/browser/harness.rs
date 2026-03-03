@@ -124,38 +124,6 @@ impl ChromiumoxideHarness {
             .as_ref()
             .ok_or_else(|| "browser page is not initialized".to_string())
     }
-
-    /// Blocks until either the browser process exits or the user presses Enter,
-    /// then shuts the browser down cleanly.
-    pub fn wait_for_close_or_enter(&mut self) {
-        let handle = self.runtime.handle().clone();
-        let task = self.handler_task.take();
-
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-
-        // Thread 1: wait for browser CDP handler to exit (browser closed by user)
-        let tx1 = tx.clone();
-        std::thread::spawn(move || {
-            if let Some(t) = task {
-                let _ = handle.block_on(t);
-            }
-            let _ = tx1.send(());
-        });
-
-        // Thread 2: wait for Enter key
-        let tx2 = tx;
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
-            let _ = tx2.send(());
-        });
-
-        // Block until either fires
-        let _ = rx.recv();
-
-        // Shut down cleanly (no-op if browser already exited; closes it if Enter was pressed)
-        let _ = self.shutdown();
-    }
 }
 
 #[derive(Deserialize, Default)]

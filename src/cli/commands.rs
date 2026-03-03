@@ -137,32 +137,38 @@ pub fn browser_open(url: Option<String>, display: bool) -> Result<(), CliError> 
         ))
     })?;
 
-    let mut launch_env = Vec::<(String, String)>::new();
+    let target = url.as_deref().unwrap_or("chrome://newtab");
+
+    let mut cmd = std::process::Command::new(&browser_binary);
+    cmd.arg(format!("--user-data-dir={}", profile_path.display()));
+    cmd.arg(target);
+
     if display {
         let dm = DisplayManager::new(&loaded.resolved.root_dir);
         let status = dm.status().map_err(CliError::fatal)?;
         let session = status.session.ok_or_else(|| {
             CliError::fatal("display session is not running; run `omens display start`")
         })?;
-        launch_env.push((
-            "XDG_RUNTIME_DIR".to_string(),
-            session.runtime_dir.display().to_string(),
-        ));
-        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+        cmd.env("XDG_RUNTIME_DIR", session.runtime_dir.display().to_string());
+        cmd.env("WAYLAND_DISPLAY", &session.wayland_socket);
+        cmd.arg("--ozone-platform=wayland");
+        cmd.arg("--force-device-scale-factor=1");
     }
-
-    let target = url.as_deref().unwrap_or("chrome://newtab");
-
-    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path.clone(), launch_env)
-        .map_err(CliError::fatal)?;
-    harness.launch(target).map_err(CliError::fatal)?;
 
     println!("browser open");
     println!("  url: {target}");
     println!("  profile: {}", profile_path.display());
-    println!("  press Enter to close the browser, or close it directly.");
 
-    harness.wait_for_close_or_enter();
+    let mut child = cmd.spawn().map_err(|e| {
+        CliError::fatal(format!(
+            "failed to launch browser {}: {e}",
+            browser_binary.display()
+        ))
+    })?;
+
+    child
+        .wait()
+        .map_err(|e| CliError::fatal(format!("failed waiting for browser process: {e}")))?;
 
     Ok(())
 }
