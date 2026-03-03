@@ -160,12 +160,9 @@ pub fn browser_open(url: Option<String>, display: bool) -> Result<(), CliError> 
     println!("browser open");
     println!("  url: {target}");
     println!("  profile: {}", profile_path.display());
-    println!("  press Enter to close the browser.");
+    println!("  press Enter to close the browser, or close it directly.");
 
-    let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .map_err(|err| CliError::fatal(format!("failed reading input: {err}")))?;
+    harness.wait_for_close_or_enter();
 
     Ok(())
 }
