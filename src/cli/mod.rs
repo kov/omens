@@ -57,7 +57,11 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::BrowserInstall { force } => commands::browser_install(force),
         Command::BrowserUpgrade => commands::browser_upgrade(),
         Command::BrowserRollback => commands::browser_rollback(),
-        Command::BrowserOpen { url, display } => commands::browser_open(url, display),
+        Command::BrowserOpen {
+            url,
+            display,
+            extra_args,
+        } => commands::browser_open(url, display, extra_args),
         Command::BrowserResetProfile => commands::browser_reset_profile(),
         Command::DisplayStart { listen_addr } => commands::display_start(listen_addr),
         Command::DisplayStop => commands::display_stop(),
@@ -90,7 +94,7 @@ fn print_usage(topic: HelpTopic) {
   omens send-email <file>\n  \
   omens chat [--display]\n  \
   omens config doctor\n  \
-  omens browser open [url] [--display]\n  \
+  omens browser open [url] [--display] [-- CHROMIUM_ARGS...]\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
   omens display start|stop|status"
             );
@@ -111,7 +115,7 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
         HelpTopic::Browser => {
             println!(
-                "Usage:\n  omens browser open [url] [--display]\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
+                "Usage:\n  omens browser open [url] [--display] [-- CHROMIUM_ARGS...]\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
             )
         }
         HelpTopic::Display => println!(
@@ -173,6 +177,7 @@ enum Command {
     BrowserOpen {
         url: Option<String>,
         display: bool,
+        extra_args: Vec<String>,
     },
     BrowserResetProfile,
     DisplayStart {
@@ -413,14 +418,30 @@ fn parse_browser(args: &[String]) -> Result<Command, String> {
     if args.len() >= 3 && args[2] == "open" {
         let mut url = None;
         let mut display = false;
+        let mut extra_args = Vec::new();
+        let mut after_dashdash = false;
         for arg in args.iter().skip(3) {
+            if after_dashdash {
+                extra_args.push(arg.clone());
+                continue;
+            }
             match arg.as_str() {
+                "--" => after_dashdash = true,
                 "--display" => display = true,
                 _ if url.is_none() && !arg.starts_with('-') => url = Some(arg.clone()),
-                _ => return Err("usage: omens browser open [url] [--display]".to_string()),
+                _ => {
+                    return Err(
+                        "usage: omens browser open [url] [--display] [-- CHROMIUM_ARGS...]"
+                            .to_string(),
+                    );
+                }
             }
         }
-        return Ok(Command::BrowserOpen { url, display });
+        return Ok(Command::BrowserOpen {
+            url,
+            display,
+            extra_args,
+        });
     }
 
     if args.len() >= 3 && args[2] == "install" {
@@ -673,7 +694,8 @@ mod tests {
             Command::parse(&to_args(&["omens", "browser", "open"])).expect("should parse"),
             Command::BrowserOpen {
                 url: None,
-                display: false
+                display: false,
+                ..
             }
         ));
     }
@@ -688,7 +710,7 @@ mod tests {
         ]))
         .expect("should parse");
         match cmd {
-            Command::BrowserOpen { url, display } => {
+            Command::BrowserOpen { url, display, .. } => {
                 assert_eq!(url, Some("https://example.com".to_string()));
                 assert!(!display);
             }
@@ -703,7 +725,8 @@ mod tests {
                 .expect("should parse"),
             Command::BrowserOpen {
                 url: None,
-                display: true
+                display: true,
+                ..
             }
         ));
     }
@@ -719,7 +742,7 @@ mod tests {
         ]))
         .expect("should parse");
         match cmd {
-            Command::BrowserOpen { url, display } => {
+            Command::BrowserOpen { url, display, .. } => {
                 assert_eq!(url, Some("https://example.com".to_string()));
                 assert!(display);
             }

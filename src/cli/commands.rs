@@ -88,8 +88,13 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
         launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
     }
 
-    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path.clone(), launch_env)
-        .map_err(CliError::fatal)?;
+    let mut harness = ChromiumoxideHarness::new(
+        browser_binary,
+        profile_path.clone(),
+        launch_env,
+        loaded.browser.extra_args.clone(),
+    )
+    .map_err(CliError::fatal)?;
     harness
         .launch(loaded.clubefii.login_url.as_str())
         .map_err(CliError::fatal)?;
@@ -122,7 +127,11 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn browser_open(url: Option<String>, display: bool) -> Result<(), CliError> {
+pub fn browser_open(
+    url: Option<String>,
+    display: bool,
+    cli_extra_args: Vec<String>,
+) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
@@ -141,6 +150,15 @@ pub fn browser_open(url: Option<String>, display: bool) -> Result<(), CliError> 
 
     let mut cmd = std::process::Command::new(&browser_binary);
     cmd.arg(format!("--user-data-dir={}", profile_path.display()));
+
+    // Config extra_args first, then CLI overrides
+    for arg in &loaded.browser.extra_args {
+        cmd.arg(arg);
+    }
+    for arg in &cli_extra_args {
+        cmd.arg(arg);
+    }
+
     cmd.arg(target);
 
     if display {
@@ -199,8 +217,13 @@ pub fn explore_start(url: String) -> Result<(), CliError> {
         launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
     }
 
-    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
-        .map_err(CliError::fatal)?;
+    let mut harness = ChromiumoxideHarness::new(
+        browser_binary,
+        profile_path,
+        launch_env,
+        loaded.browser.extra_args.clone(),
+    )
+    .map_err(CliError::fatal)?;
 
     let store = Store::open(&loaded.resolved.storage_db_path).map_err(CliError::fatal)?;
     store.migrate().map_err(CliError::fatal)?;
@@ -727,8 +750,13 @@ fn do_collect(
         launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
     }
 
-    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
-        .map_err(|e| e.to_string())?;
+    let mut harness = ChromiumoxideHarness::new(
+        browser_binary,
+        profile_path,
+        launch_env,
+        loaded.browser.extra_args.clone(),
+    )
+    .map_err(|e| e.to_string())?;
 
     let base_url = &loaded.clubefii.base_url;
     let mut stats = CollectStats {
@@ -1298,8 +1326,13 @@ pub fn chat(display: bool) -> Result<(), CliError> {
         }
     }
 
-    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
-        .map_err(CliError::fatal)?;
+    let mut harness = ChromiumoxideHarness::new(
+        browser_binary,
+        profile_path,
+        launch_env,
+        loaded.browser.extra_args.clone(),
+    )
+    .map_err(CliError::fatal)?;
     harness.launch("about:blank").map_err(CliError::fatal)?;
 
     let result = crate::chat::run_chat_loop(&mut harness, &loaded.chat);
@@ -1580,8 +1613,13 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
             .ok_or_else(|| CliError::fatal("item has no source URL stored in DB"))?
     };
 
-    let mut harness = ChromiumoxideHarness::new(browser_binary, profile_path, launch_env)
-        .map_err(CliError::fatal)?;
+    let mut harness = ChromiumoxideHarness::new(
+        browser_binary,
+        profile_path,
+        launch_env,
+        loaded.browser.extra_args.clone(),
+    )
+    .map_err(CliError::fatal)?;
     harness.launch(&initial_url).map_err(CliError::fatal)?;
     std::thread::sleep(Duration::from_secs(3));
     harness.dismiss_overlays();

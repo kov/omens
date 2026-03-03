@@ -90,6 +90,7 @@ pub struct ChromiumoxideHarness {
     browser_binary: PathBuf,
     profile_dir: PathBuf,
     launch_env: Vec<(String, String)>,
+    extra_args: Vec<String>,
     runtime: tokio::runtime::Runtime,
     browser: Option<Browser>,
     page: Option<Page>,
@@ -101,6 +102,7 @@ impl ChromiumoxideHarness {
         browser_binary: PathBuf,
         profile_dir: PathBuf,
         launch_env: Vec<(String, String)>,
+        extra_args: Vec<String>,
     ) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_io()
@@ -112,6 +114,7 @@ impl ChromiumoxideHarness {
             browser_binary,
             profile_dir,
             launch_env,
+            extra_args,
             runtime,
             browser: None,
             page: None,
@@ -167,6 +170,14 @@ impl BrowserHarness for ChromiumoxideHarness {
             builder = builder
                 .arg(("ozone-platform", "wayland"))
                 .arg(("force-device-scale-factor", "1"));
+        }
+        for arg in &self.extra_args {
+            let stripped = arg.strip_prefix("--").unwrap_or(arg);
+            if let Some((key, value)) = stripped.split_once('=') {
+                builder = builder.arg((key, value));
+            } else {
+                builder = builder.arg((stripped, ""));
+            }
         }
         for (key, value) in &self.launch_env {
             builder = builder.env(key.clone(), value.clone());

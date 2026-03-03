@@ -173,6 +173,8 @@ pub struct BrowserConfig {
     pub bundled_build: u64,
     #[serde(default)]
     pub user_data_dir: Option<String>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
 }
 
 impl Default for BrowserConfig {
@@ -182,6 +184,7 @@ impl Default for BrowserConfig {
             system_binary_path: None,
             bundled_build: 0,
             user_data_dir: None,
+            extra_args: Vec::new(),
         }
     }
 }
