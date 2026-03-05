@@ -1371,7 +1371,7 @@ pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
         }
         super::BrowseCommand::Scroll { direction, pixels } => {
             let port = require_session(&session_mgr)?.port;
-            browse::commands::scroll(port, &direction, pixels).map_err(CliError::fatal)
+            browse::commands::scroll(port, direction, pixels).map_err(CliError::fatal)
         }
         super::BrowseCommand::Eval { expression } => {
             let port = require_session(&session_mgr)?.port;

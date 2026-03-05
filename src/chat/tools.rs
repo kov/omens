@@ -1,5 +1,5 @@
 use crate::browse::{collapse_blank_lines, find_elements_js, truncate_str};
-use crate::browser::harness::BrowserHarness;
+use crate::browser::harness::{BrowserHarness, ScrollDirection};
 use serde_json::{Value, json};
 
 pub fn tool_definitions() -> Vec<Value> {
@@ -167,12 +167,13 @@ fn exec_find_elements(args: &Value, harness: &dyn BrowserHarness) -> Result<Stri
 }
 
 fn exec_scroll(args: &Value, harness: &dyn BrowserHarness) -> Result<String, String> {
-    let direction = args["direction"]
+    let direction_str = args["direction"]
         .as_str()
         .ok_or("missing 'direction' parameter")?;
+    let direction = ScrollDirection::parse(direction_str)?;
     let amount = args["amount"].as_u64().unwrap_or(600) as u32;
     harness.scroll(direction, amount)?;
-    Ok(json!({"scrolled": direction, "pixels": amount}).to_string())
+    Ok(json!({"scrolled": direction.as_str(), "pixels": amount}).to_string())
 }
 
 fn exec_eval_js(args: &Value, harness: &dyn BrowserHarness) -> Result<String, String> {

@@ -131,7 +131,7 @@ mod tests {
     use super::{
         AuthError, AuthValidationConfig, EphemeralProfile, validate_session, wait_for_login,
     };
-    use crate::browser::harness::BrowserHarness;
+    use crate::browser::harness::{BrowserHarness, ScrollDirection};
     use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
@@ -243,7 +243,7 @@ mod tests {
             Ok(())
         }
 
-        fn scroll(&self, _direction: &str, _pixels: u32) -> Result<(), String> {
+        fn scroll(&self, _direction: ScrollDirection, _pixels: u32) -> Result<(), String> {
             Ok(())
         }
 
