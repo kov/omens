@@ -914,7 +914,7 @@ fn do_collect(
                     let stable_key = format!("external_id:{external_id}");
 
                     let normalized_json = build_normalized_json(&fields);
-                    let hash = store::content_hash_fnv(&normalized_json);
+                    let hash = content_hash_for_section(section, &normalized_json);
                     let published_at = extract_published_at(section, &normalized_json);
 
                     let (item_id, is_new) = store.upsert_item(
@@ -1004,7 +1004,7 @@ fn do_collect(
                     let stable_key = format!("external_id:{external_id}");
 
                     let normalized_json = build_normalized_json(fields);
-                    let hash = store::content_hash_fnv(&normalized_json);
+                    let hash = content_hash_for_section(section, &normalized_json);
                     let published_at = extract_published_at(section, &normalized_json);
 
                     let (item_id, is_new) = store.upsert_item(
@@ -1130,6 +1130,27 @@ fn build_normalized_json(fields: &HashMap<String, String>) -> String {
         .collect();
     sorted.sort_by_key(|(k, _)| *k);
     serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Fields excluded from the content hash for proventos items.
+/// These are derived from market price and change daily without reflecting
+/// an actual change to the dividend declaration.
+const PROVENTOS_VOLATILE_FIELDS: &[&str] = &["COTAÇÃO DAT. BASE", "YIELD DAT. BASE"];
+
+/// Compute a content hash that excludes volatile fields for certain sections.
+fn content_hash_for_section(section: &str, normalized_json: &str) -> String {
+    if section == "proventos"
+        && let Ok(pairs) = serde_json::from_str::<Vec<[String; 2]>>(normalized_json)
+    {
+        let filtered: Vec<&[String; 2]> = pairs
+            .iter()
+            .filter(|[k, _]| !PROVENTOS_VOLATILE_FIELDS.contains(&k.as_str()))
+            .collect();
+        return store::content_hash_fnv(
+            &serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+    store::content_hash_fnv(normalized_json)
 }
 
 pub fn run_all() -> Result<(), CliError> {
@@ -2462,6 +2483,33 @@ mod tests {
         assert_eq!(
             compact_summary("some unknown format"),
             "some unknown format"
+        );
+    }
+
+    #[test]
+    fn content_hash_for_section_excludes_volatile_proventos_fields() {
+        use super::content_hash_for_section;
+
+        let full = r#"[["COTAÇÃO DAT. BASE","85,94"],["DATA BASE","30/12/2026"],["TIPO","RENDIMENTO"],["VALOR","0,900"],["YIELD DAT. BASE","1,05 %"]]"#;
+        let price_changed = r#"[["COTAÇÃO DAT. BASE","85,45"],["DATA BASE","30/12/2026"],["TIPO","RENDIMENTO"],["VALOR","0,900"],["YIELD DAT. BASE","1,10 %"]]"#;
+        let valor_changed = r#"[["COTAÇÃO DAT. BASE","85,94"],["DATA BASE","30/12/2026"],["TIPO","RENDIMENTO"],["VALOR","1,000"],["YIELD DAT. BASE","1,05 %"]]"#;
+
+        // Price-only change should produce the same hash
+        assert_eq!(
+            content_hash_for_section("proventos", full),
+            content_hash_for_section("proventos", price_changed),
+        );
+
+        // Actual valor change should produce a different hash
+        assert_ne!(
+            content_hash_for_section("proventos", full),
+            content_hash_for_section("proventos", valor_changed),
+        );
+
+        // Non-proventos sections hash the full payload
+        assert_ne!(
+            content_hash_for_section("comunicados", full),
+            content_hash_for_section("comunicados", price_changed),
         );
     }
 }
