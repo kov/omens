@@ -192,32 +192,31 @@ pub fn run_chat_loop(harness: &mut dyn BrowserHarness, config: &ChatConfig) -> R
 }
 
 /// Keep the last `max_items` items in the input array.
-/// Always preserve unresolved function_call/function_call_output pairs.
+/// Adjusts the cut point backward so function_call/function_call_output
+/// pairs are never split.
 fn trim_history(input: &mut Vec<Value>, max_items: usize) {
     if input.len() <= max_items {
         return;
     }
 
-    // Find the earliest safe cut point: don't split in the middle of
-    // a function_call that hasn't been resolved yet
     let excess = input.len() - max_items;
     let mut cut = excess;
 
-    // Walk forward from the cut point to find a safe boundary
-    while cut < input.len() {
+    // If the kept portion starts with function_call_output, walk backward
+    // to include the function_call that produced it, keeping the pair intact.
+    while cut > 0 {
         let item_type = input[cut]
             .get("type")
             .and_then(|t| t.as_str())
             .unwrap_or("");
-        // Don't start in the middle of tool output
         if item_type == "function_call_output" {
-            cut += 1;
-            continue;
+            cut -= 1;
+        } else {
+            break;
         }
-        break;
     }
 
-    if cut > 0 && cut < input.len() {
+    if cut > 0 {
         input.drain(..cut);
     }
 }
