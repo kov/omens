@@ -1,4 +1,4 @@
-use super::{eval_on_page, wait_for_ready_state, with_page};
+use super::{collapse_blank_lines, eval_on_page, wait_for_ready_state, with_page};
 
 pub fn navigate(port: u16, url: &str) -> Result<(), String> {
     let url = url.to_string();
@@ -263,23 +263,4 @@ pub fn links(port: u16, contains: Option<&str>, max_results: usize) -> Result<()
         }
         Ok(())
     })
-}
-
-fn collapse_blank_lines(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut prev_blank = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if !prev_blank {
-                result.push('\n');
-                prev_blank = true;
-            }
-        } else {
-            result.push_str(line);
-            result.push('\n');
-            prev_blank = false;
-        }
-    }
-    result
 }

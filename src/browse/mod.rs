@@ -93,3 +93,23 @@ pub async fn eval_on_page(page: &Page, js: &str) -> Result<serde_json::Value, St
     let value: serde_json::Value = result.into_value().unwrap_or(serde_json::Value::Null);
     Ok(value)
 }
+
+/// Collapse runs of blank lines into a single blank line.
+pub fn collapse_blank_lines(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut prev_blank = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !prev_blank {
+                result.push('\n');
+                prev_blank = true;
+            }
+        } else {
+            result.push_str(line);
+            result.push('\n');
+            prev_blank = false;
+        }
+    }
+    result
+}
