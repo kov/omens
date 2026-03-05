@@ -52,7 +52,7 @@ pub fn content(port: u16, max_chars: u32, full: bool) -> Result<(), String> {
         let text = value.as_str().unwrap_or("");
         let cleaned = collapse_blank_lines(text);
         let max = max_chars as usize;
-        if cleaned.len() > max {
+        if cleaned.chars().count() > max {
             print!("{}", truncate_str(&cleaned, max));
             println!("\n[truncated at {max} chars]");
         } else {

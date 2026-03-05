@@ -140,14 +140,10 @@ pub fn find_elements_js(selector: &str, max_results: usize) -> String {
     )
 }
 
-/// Truncate a string to at most `max` bytes, without splitting a UTF-8 character.
+/// Truncate a string to at most `max` Unicode characters.
 pub fn truncate_str(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
     }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }

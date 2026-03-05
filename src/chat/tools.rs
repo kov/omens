@@ -132,7 +132,7 @@ fn exec_page_content(harness: &dyn BrowserHarness, max_chars: u32) -> Result<Str
     let cleaned: String = collapse_blank_lines(&text);
 
     let max = max_chars as usize;
-    if cleaned.len() > max {
+    if cleaned.chars().count() > max {
         let truncated = truncate_str(&cleaned, max);
         Ok(format!("{truncated}\n[truncated at {max} chars]"))
     } else {
