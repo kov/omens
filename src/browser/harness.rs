@@ -10,6 +10,36 @@ use chromiumoxide::cdp::browser_protocol::network::{
 };
 use chromiumoxide::{Browser, BrowserConfig, Page};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollDirection {
+    Up,
+    Down,
+}
+
+impl ScrollDirection {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "up" => Ok(Self::Up),
+            "down" => Ok(Self::Down),
+            _ => Err(format!("invalid scroll direction: {s} (use up or down)")),
+        }
+    }
+
+    pub fn dy(self, pixels: u32) -> i64 {
+        match self {
+            Self::Up => -(pixels as i64),
+            Self::Down => pixels as i64,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+}
+
 pub trait BrowserHarness {
     fn launch(&mut self, url: &str) -> Result<(), String>;
     fn current_url(&self) -> Result<String, String>;
@@ -44,7 +74,7 @@ pub trait BrowserHarness {
     /// Focus an element and type text into it.
     fn type_text(&self, selector: &str, text: &str) -> Result<(), String>;
     /// Scroll the page up or down by the given number of pixels.
-    fn scroll(&self, direction: &str, pixels: u32) -> Result<(), String>;
+    fn scroll(&self, direction: ScrollDirection, pixels: u32) -> Result<(), String>;
     /// Evaluate a raw JS expression and return the JSON-stringified result.
     fn evaluate_js(&self, expression: &str) -> Result<String, String>;
 }
@@ -756,13 +786,9 @@ impl BrowserHarness for ChromiumoxideHarness {
             .map(|_| ())
     }
 
-    fn scroll(&self, direction: &str, pixels: u32) -> Result<(), String> {
+    fn scroll(&self, direction: ScrollDirection, pixels: u32) -> Result<(), String> {
         let page = self.page()?.clone();
-        let dy = match direction {
-            "up" => -(pixels as i64),
-            "down" => pixels as i64,
-            _ => return Err(format!("invalid scroll direction: {direction}")),
-        };
+        let dy = direction.dy(pixels);
         let js = format!("window.scrollBy(0, {dy})");
         self.runtime
             .block_on(async {

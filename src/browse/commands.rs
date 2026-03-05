@@ -1,3 +1,5 @@
+use crate::browser::harness::ScrollDirection;
+
 use super::{
     collapse_blank_lines, eval_on_page, find_elements_js, truncate_str, wait_for_ready_state,
     with_page,
@@ -112,17 +114,8 @@ pub fn find(port: u16, selector: &str, max_results: usize) -> Result<(), String>
     })
 }
 
-pub fn scroll(port: u16, direction: &str, pixels: u32) -> Result<(), String> {
-    let dy: i64 = match direction {
-        "up" => -(pixels as i64),
-        "down" => pixels as i64,
-        _ => {
-            return Err(format!(
-                "invalid scroll direction: {direction} (use up or down)"
-            ));
-        }
-    };
-    let js = format!("window.scrollBy(0, {dy})");
+pub fn scroll(port: u16, direction: ScrollDirection, pixels: u32) -> Result<(), String> {
+    let js = format!("window.scrollBy(0, {})", direction.dy(pixels));
     with_page(port, |page| async move {
         eval_on_page(&page, &js).await?;
         println!("ok");

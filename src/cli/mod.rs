@@ -1,5 +1,7 @@
 mod commands;
 
+use crate::browser::harness::ScrollDirection;
+
 pub const EX_FATAL: i32 = 40;
 pub const EX_AUTH_REQUIRED: i32 = 20;
 pub const EX_LOCK_CONFLICT: i32 = 30;
@@ -239,7 +241,7 @@ pub enum BrowseCommand {
         max_results: usize,
     },
     Scroll {
-        direction: String,
+        direction: ScrollDirection,
         pixels: u32,
     },
     Eval {
@@ -608,10 +610,7 @@ fn parse_browse(args: &[String]) -> Result<Command, String> {
             if args.len() < 4 || args.len() > 5 {
                 return Err("usage: omens browse scroll <up|down> [pixels]".to_string());
             }
-            let direction = args[3].clone();
-            if direction != "up" && direction != "down" {
-                return Err("scroll direction must be 'up' or 'down'".to_string());
-            }
+            let direction = ScrollDirection::parse(&args[3])?;
             let pixels = if args.len() == 5 {
                 args[4]
                     .parse::<u32>()
