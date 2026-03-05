@@ -1,3 +1,4 @@
+use crate::browse::collapse_blank_lines;
 use crate::browser::harness::BrowserHarness;
 use serde_json::{Value, json};
 
@@ -137,25 +138,6 @@ fn exec_page_content(harness: &dyn BrowserHarness, max_chars: u32) -> Result<Str
     } else {
         Ok(cleaned)
     }
-}
-
-fn collapse_blank_lines(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut prev_blank = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if !prev_blank {
-                result.push('\n');
-                prev_blank = true;
-            }
-        } else {
-            result.push_str(line);
-            result.push('\n');
-            prev_blank = false;
-        }
-    }
-    result
 }
 
 fn exec_click(args: &Value, harness: &dyn BrowserHarness) -> Result<String, String> {
