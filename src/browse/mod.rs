@@ -114,6 +114,32 @@ pub fn collapse_blank_lines(text: &str) -> String {
     result
 }
 
+/// Build JS to find elements matching a selector and return their attributes.
+pub fn find_elements_js(selector: &str, max_results: usize) -> String {
+    let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"(function() {{
+            var els = document.querySelectorAll({sel_json});
+            var results = [];
+            var limit = {max_results};
+            for (var i = 0; i < els.length && results.length < limit; i++) {{
+                var el = els[i];
+                results.push({{
+                    tag: el.tagName.toLowerCase(),
+                    text: (el.textContent || '').trim().substring(0, 200),
+                    href: el.getAttribute('href') || '',
+                    id: el.id || '',
+                    class: el.className || '',
+                    name: el.getAttribute('name') || '',
+                    value: el.value || '',
+                    type: el.getAttribute('type') || ''
+                }});
+            }}
+            return results;
+        }})()"#
+    )
+}
+
 /// Truncate a string to at most `max` bytes, without splitting a UTF-8 character.
 pub fn truncate_str(s: &str, max: usize) -> &str {
     if s.len() <= max {
