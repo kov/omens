@@ -50,6 +50,9 @@ mod defaults {
     pub fn chat_max_page_chars() -> u32 {
         16000
     }
+    pub fn browse_max_page_chars() -> u32 {
+        16000
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -175,6 +178,8 @@ pub struct BrowserConfig {
     pub user_data_dir: Option<String>,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    #[serde(default = "defaults::browse_max_page_chars")]
+    pub max_page_chars: u32,
 }
 
 impl Default for BrowserConfig {
@@ -185,6 +190,7 @@ impl Default for BrowserConfig {
             bundled_build: 0,
             user_data_dir: None,
             extra_args: Vec::new(),
+            max_page_chars: defaults::browse_max_page_chars(),
         }
     }
 }

@@ -1430,7 +1430,7 @@ pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
             let max = if max_chars > 0 {
                 max_chars
             } else {
-                loaded.chat.max_page_chars
+                loaded.browser.max_page_chars
             };
             browse::commands::content(port, max, full).map_err(CliError::fatal)
         }
