@@ -137,12 +137,16 @@ impl BrowseSessionManager {
     }
 
     pub fn read_state(&self) -> Result<Option<BrowseSession>, String> {
-        if !self.state_file.exists() {
-            return Ok(None);
-        }
-
-        let text = fs::read_to_string(&self.state_file)
-            .map_err(|err| format!("failed to read {}: {err}", self.state_file.display()))?;
+        let text = match fs::read_to_string(&self.state_file) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(format!(
+                    "failed to read {}: {err}",
+                    self.state_file.display()
+                ));
+            }
+        };
 
         let mut pid = None;
         let mut port = None;
