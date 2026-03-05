@@ -74,19 +74,7 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
         ephemeral_profile = None;
     }
 
-    let mut launch_env = Vec::<(String, String)>::new();
-    if display {
-        let manager = DisplayManager::new(&loaded.resolved.root_dir);
-        let status = manager.status().map_err(CliError::fatal)?;
-        let session = status.session.ok_or_else(|| {
-            CliError::fatal("display session is not running; run `omens display start`")
-        })?;
-        launch_env.push((
-            "XDG_RUNTIME_DIR".to_string(),
-            session.runtime_dir.display().to_string(),
-        ));
-        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-    }
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
 
     let mut harness = ChromiumoxideHarness::new(
         browser_binary,
@@ -161,14 +149,11 @@ pub fn browser_open(
 
     cmd.arg(target);
 
-    if display {
-        let dm = DisplayManager::new(&loaded.resolved.root_dir);
-        let status = dm.status().map_err(CliError::fatal)?;
-        let session = status.session.ok_or_else(|| {
-            CliError::fatal("display session is not running; run `omens display start`")
-        })?;
-        cmd.env("XDG_RUNTIME_DIR", session.runtime_dir.display().to_string());
-        cmd.env("WAYLAND_DISPLAY", &session.wayland_socket);
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
+    for (key, value) in &launch_env {
+        cmd.env(key, value);
+    }
+    if !launch_env.is_empty() {
         cmd.arg("--ozone-platform=wayland");
         cmd.arg("--force-device-scale-factor=1");
     }
@@ -205,17 +190,7 @@ pub fn explore_start(url: String) -> Result<(), CliError> {
         ))
     })?;
 
-    let mut launch_env = Vec::<(String, String)>::new();
-    let display_mgr = DisplayManager::new(&loaded.resolved.root_dir);
-    if let Ok(status) = display_mgr.status()
-        && let Some(session) = status.session
-    {
-        launch_env.push((
-            "XDG_RUNTIME_DIR".to_string(),
-            session.runtime_dir.display().to_string(),
-        ));
-        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-    }
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, false)?;
 
     let mut harness = ChromiumoxideHarness::new(
         browser_binary,
@@ -738,17 +713,8 @@ fn do_collect(
     std::fs::create_dir_all(&profile_path)
         .map_err(|e| format!("failed to create browser profile: {e}"))?;
 
-    let mut launch_env = Vec::<(String, String)>::new();
-    let display_mgr = DisplayManager::new(&loaded.resolved.root_dir);
-    if let Ok(status) = display_mgr.status()
-        && let Some(session) = status.session
-    {
-        launch_env.push((
-            "XDG_RUNTIME_DIR".to_string(),
-            session.runtime_dir.display().to_string(),
-        ));
-        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-    }
+    let launch_env =
+        display_launch_env(&loaded.resolved.root_dir, false).map_err(|e| e.to_string())?;
 
     let mut harness = ChromiumoxideHarness::new(
         browser_binary,
@@ -1301,30 +1267,7 @@ pub fn chat(display: bool) -> Result<(), CliError> {
         ))
     })?;
 
-    let mut launch_env = Vec::<(String, String)>::new();
-    if display {
-        let dm = DisplayManager::new(&loaded.resolved.root_dir);
-        let status = dm.status().map_err(CliError::fatal)?;
-        let session = status.session.ok_or_else(|| {
-            CliError::fatal("display session is not running; run `omens display start`")
-        })?;
-        launch_env.push((
-            "XDG_RUNTIME_DIR".to_string(),
-            session.runtime_dir.display().to_string(),
-        ));
-        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-    } else {
-        let dm = DisplayManager::new(&loaded.resolved.root_dir);
-        if let Ok(status) = dm.status()
-            && let Some(session) = status.session
-        {
-            launch_env.push((
-                "XDG_RUNTIME_DIR".to_string(),
-                session.runtime_dir.display().to_string(),
-            ));
-            launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-        }
-    }
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
 
     let mut harness = ChromiumoxideHarness::new(
         browser_binary,
@@ -1355,33 +1298,10 @@ pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
             let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
             let profile_dir = manager.default_profile_dir().to_path_buf();
 
-            let mut launch_env = Vec::<(String, String)>::new();
-            if display {
-                let dm = DisplayManager::new(&loaded.resolved.root_dir);
-                let status = dm.status().map_err(CliError::fatal)?;
-                let session = status.session.ok_or_else(|| {
-                    CliError::fatal("display session is not running; run `omens display start`")
-                })?;
-                launch_env.push((
-                    "XDG_RUNTIME_DIR".to_string(),
-                    session.runtime_dir.display().to_string(),
-                ));
-                launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-            } else {
-                let dm = DisplayManager::new(&loaded.resolved.root_dir);
-                if let Ok(status) = dm.status()
-                    && let Some(session) = status.session
-                {
-                    launch_env.push((
-                        "XDG_RUNTIME_DIR".to_string(),
-                        session.runtime_dir.display().to_string(),
-                    ));
-                    launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-                }
-            }
+            let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
 
             let mut extra_args = loaded.browser.extra_args.clone();
-            if launch_env.iter().any(|(k, _)| k == "WAYLAND_DISPLAY") {
+            if !launch_env.is_empty() {
                 extra_args.push("--ozone-platform=wayland".to_string());
                 extra_args.push("--force-device-scale-factor=1".to_string());
             }
@@ -1472,6 +1392,42 @@ pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
             let port = require_session(&session_mgr)?.port;
             browse::commands::url(port).map_err(CliError::fatal)
         }
+    }
+}
+
+/// Resolve display environment variables for browser launch.
+///
+/// When `require` is true, fails if no display session is running.
+/// When false, returns env pairs if a session exists, or an empty vec otherwise.
+fn display_launch_env(
+    root_dir: &std::path::Path,
+    require: bool,
+) -> Result<Vec<(String, String)>, CliError> {
+    let dm = DisplayManager::new(root_dir);
+    if require {
+        let status = dm.status().map_err(CliError::fatal)?;
+        let session = status.session.ok_or_else(|| {
+            CliError::fatal("display session is not running; run `omens display start`")
+        })?;
+        Ok(vec![
+            (
+                "XDG_RUNTIME_DIR".to_string(),
+                session.runtime_dir.display().to_string(),
+            ),
+            ("WAYLAND_DISPLAY".to_string(), session.wayland_socket),
+        ])
+    } else if let Ok(status) = dm.status()
+        && let Some(session) = status.session
+    {
+        Ok(vec![
+            (
+                "XDG_RUNTIME_DIR".to_string(),
+                session.runtime_dir.display().to_string(),
+            ),
+            ("WAYLAND_DISPLAY".to_string(), session.wayland_socket),
+        ])
+    } else {
+        Ok(vec![])
     }
 }
 
@@ -1724,17 +1680,7 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
     let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
     let profile_path = manager.default_profile_dir().to_path_buf();
 
-    let mut launch_env = Vec::<(String, String)>::new();
-    let display_mgr = DisplayManager::new(&loaded.resolved.root_dir);
-    if let Ok(status) = display_mgr.status()
-        && let Some(session) = status.session
-    {
-        launch_env.push((
-            "XDG_RUNTIME_DIR".to_string(),
-            session.runtime_dir.display().to_string(),
-        ));
-        launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
-    }
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, false)?;
 
     // Determine the initial URL to open in the browser.
     let initial_url = if is_url {
