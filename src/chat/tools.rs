@@ -1,4 +1,4 @@
-use crate::browse::{collapse_blank_lines, truncate_str};
+use crate::browse::{collapse_blank_lines, find_elements_js, truncate_str};
 use crate::browser::harness::BrowserHarness;
 use serde_json::{Value, json};
 
@@ -161,30 +161,8 @@ fn exec_find_elements(args: &Value, harness: &dyn BrowserHarness) -> Result<Stri
     let selector = args["selector"]
         .as_str()
         .ok_or("missing 'selector' parameter")?;
-    let max_results = args["max_results"].as_u64().unwrap_or(20) as u32;
-
-    let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
-    let js = format!(
-        r#"(function() {{
-            var els = document.querySelectorAll({sel_json});
-            var results = [];
-            var limit = {max_results};
-            for (var i = 0; i < els.length && results.length < limit; i++) {{
-                var el = els[i];
-                results.push({{
-                    tag: el.tagName.toLowerCase(),
-                    text: (el.textContent || '').trim().substring(0, 200),
-                    href: el.getAttribute('href') || '',
-                    id: el.id || '',
-                    class: el.className || '',
-                    name: el.getAttribute('name') || '',
-                    value: el.value || '',
-                    type: el.getAttribute('type') || ''
-                }});
-            }}
-            return results;
-        }})()"#
-    );
+    let max_results = args["max_results"].as_u64().unwrap_or(20) as usize;
+    let js = find_elements_js(selector, max_results);
     harness.evaluate_js(&js)
 }
 

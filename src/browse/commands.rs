@@ -1,4 +1,7 @@
-use super::{collapse_blank_lines, eval_on_page, truncate_str, wait_for_ready_state, with_page};
+use super::{
+    collapse_blank_lines, eval_on_page, find_elements_js, truncate_str, wait_for_ready_state,
+    with_page,
+};
 
 pub fn navigate(port: u16, url: &str) -> Result<(), String> {
     let url = url.to_string();
@@ -100,28 +103,7 @@ pub fn type_text(port: u16, selector: &str, text: &str) -> Result<(), String> {
 }
 
 pub fn find(port: u16, selector: &str, max_results: usize) -> Result<(), String> {
-    let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
-    let js = format!(
-        r#"(function() {{
-            var els = document.querySelectorAll({sel_json});
-            var results = [];
-            var limit = {max_results};
-            for (var i = 0; i < els.length && results.length < limit; i++) {{
-                var el = els[i];
-                results.push({{
-                    tag: el.tagName.toLowerCase(),
-                    text: (el.textContent || '').trim().substring(0, 200),
-                    href: el.getAttribute('href') || '',
-                    id: el.id || '',
-                    class: el.className || '',
-                    name: el.getAttribute('name') || '',
-                    value: el.value || '',
-                    type: el.getAttribute('type') || ''
-                }});
-            }}
-            return results;
-        }})()"#
-    );
+    let js = find_elements_js(selector, max_results);
     with_page(port, |page| async move {
         let value = eval_on_page(&page, &js).await?;
         let output = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
