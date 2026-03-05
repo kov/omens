@@ -1,4 +1,4 @@
-use super::{collapse_blank_lines, eval_on_page, wait_for_ready_state, with_page};
+use super::{collapse_blank_lines, eval_on_page, truncate_str, wait_for_ready_state, with_page};
 
 pub fn navigate(port: u16, url: &str) -> Result<(), String> {
     let url = url.to_string();
@@ -48,7 +48,7 @@ pub fn content(port: u16, max_chars: u32, full: bool) -> Result<(), String> {
         let cleaned = collapse_blank_lines(text);
         let max = max_chars as usize;
         if cleaned.len() > max {
-            print!("{}", &cleaned[..max]);
+            print!("{}", truncate_str(&cleaned, max));
             println!("\n[truncated at {max} chars]");
         } else {
             print!("{cleaned}");

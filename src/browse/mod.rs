@@ -113,3 +113,15 @@ pub fn collapse_blank_lines(text: &str) -> String {
     }
     result
 }
+
+/// Truncate a string to at most `max` bytes, without splitting a UTF-8 character.
+pub fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}

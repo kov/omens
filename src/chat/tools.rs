@@ -1,4 +1,4 @@
-use crate::browse::collapse_blank_lines;
+use crate::browse::{collapse_blank_lines, truncate_str};
 use crate::browser::harness::BrowserHarness;
 use serde_json::{Value, json};
 
@@ -133,7 +133,7 @@ fn exec_page_content(harness: &dyn BrowserHarness, max_chars: u32) -> Result<Str
 
     let max = max_chars as usize;
     if cleaned.len() > max {
-        let truncated = &cleaned[..max];
+        let truncated = truncate_str(&cleaned, max);
         Ok(format!("{truncated}\n[truncated at {max} chars]"))
     } else {
         Ok(cleaned)
