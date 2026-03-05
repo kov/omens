@@ -11,12 +11,8 @@ cargo run -- report since 30d       # cross-run: signals with published_at in la
 # etc.
 ```
 
-## Pipeline skill
+## Skills
 
-Full pipeline documentation (explore → collect → report → analysis) is in:
-
-```
-skills/use-omens/SKILL.md
-```
-
-Invoke it with `/use-omens` when you need to run any part of the omens pipeline.
+- **`/use-omens`** — FII data pipeline (explore → collect → report → analysis). See `skills/use-omens/SKILL.md`.
+- **`/browse`** — Interactive CDP browser session for navigating, scraping, and interacting with any website. See `skills/browse/SKILL.md`.
+- **`/br-investing-pro`** — Look up financial metrics for B3 equities on br.investing.com (Data Explorer, ratios pages). See `skills/br-investing-pro/SKILL.md`.

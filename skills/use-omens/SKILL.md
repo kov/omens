@@ -306,6 +306,14 @@ then published_at descending.
 
 ---
 
+## Browse — Interactive Web Exploration
+
+For interactive browser automation (navigating sites, extracting content,
+clicking elements), use `/browse`. The browse session shares the same display
+and browser infrastructure as the collect pipeline.
+
+---
+
 ## Investigating the Database
 
 DB path: `~/.omens/db/omens.db`

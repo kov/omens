@@ -1,5 +1,6 @@
 mod analyze;
 mod auth;
+mod browse;
 mod browser;
 mod chat;
 mod cli;

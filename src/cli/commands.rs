@@ -1340,6 +1340,149 @@ pub fn chat(display: bool) -> Result<(), CliError> {
     result.map_err(CliError::fatal)
 }
 
+pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
+    use crate::browse;
+    use crate::browse::session::BrowseSessionManager;
+
+    let loaded = config::load_default_config().map_err(CliError::fatal)?;
+    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
+
+    let session_mgr = BrowseSessionManager::new(&loaded.resolved.root_dir);
+
+    match cmd {
+        super::BrowseCommand::Start { port, display } => {
+            let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+            let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
+            let profile_dir = manager.default_profile_dir().to_path_buf();
+
+            let mut launch_env = Vec::<(String, String)>::new();
+            if display {
+                let dm = DisplayManager::new(&loaded.resolved.root_dir);
+                let status = dm.status().map_err(CliError::fatal)?;
+                let session = status.session.ok_or_else(|| {
+                    CliError::fatal("display session is not running; run `omens display start`")
+                })?;
+                launch_env.push((
+                    "XDG_RUNTIME_DIR".to_string(),
+                    session.runtime_dir.display().to_string(),
+                ));
+                launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+            } else {
+                let dm = DisplayManager::new(&loaded.resolved.root_dir);
+                if let Ok(status) = dm.status()
+                    && let Some(session) = status.session
+                {
+                    launch_env.push((
+                        "XDG_RUNTIME_DIR".to_string(),
+                        session.runtime_dir.display().to_string(),
+                    ));
+                    launch_env.push(("WAYLAND_DISPLAY".to_string(), session.wayland_socket));
+                }
+            }
+
+            let mut extra_args = loaded.browser.extra_args.clone();
+            if launch_env.iter().any(|(k, _)| k == "WAYLAND_DISPLAY") {
+                extra_args.push("--ozone-platform=wayland".to_string());
+                extra_args.push("--force-device-scale-factor=1".to_string());
+            }
+
+            let session = session_mgr
+                .start(
+                    &browser_binary,
+                    &profile_dir,
+                    port,
+                    &launch_env,
+                    &extra_args,
+                )
+                .map_err(CliError::fatal)?;
+
+            println!("browse session started");
+            println!("  pid: {}", session.pid);
+            println!("  port: {}", session.port);
+            println!("  profile: {}", session.profile_dir.display());
+            Ok(())
+        }
+        super::BrowseCommand::Stop => {
+            session_mgr.stop().map_err(CliError::fatal)?;
+            println!("browse session stopped");
+            Ok(())
+        }
+        super::BrowseCommand::Status => {
+            match session_mgr.status().map_err(CliError::fatal)? {
+                Some(session) => {
+                    println!("browse session running");
+                    println!("  pid: {}", session.pid);
+                    println!("  port: {}", session.port);
+                    println!("  profile: {}", session.profile_dir.display());
+                }
+                None => {
+                    println!("browse session not running");
+                }
+            }
+            Ok(())
+        }
+        super::BrowseCommand::Navigate { url } => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::navigate(port, &url).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Content { max_chars, full } => {
+            let port = require_session(&session_mgr)?.port;
+            let max = if max_chars > 0 {
+                max_chars
+            } else {
+                loaded.chat.max_page_chars
+            };
+            browse::commands::content(port, max, full).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Click { selector } => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::click(port, &selector).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Type { selector, text } => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::type_text(port, &selector, &text).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Find {
+            selector,
+            max_results,
+        } => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::find(port, &selector, max_results).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Scroll { direction, pixels } => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::scroll(port, &direction, pixels).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Eval { expression } => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::eval(port, &expression).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Links {
+            contains,
+            max_results,
+        } => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::links(port, contains.as_deref(), max_results).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Source => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::source(port).map_err(CliError::fatal)
+        }
+        super::BrowseCommand::Url => {
+            let port = require_session(&session_mgr)?.port;
+            browse::commands::url(port).map_err(CliError::fatal)
+        }
+    }
+}
+
+fn require_session(
+    mgr: &crate::browse::session::BrowseSessionManager,
+) -> Result<crate::browse::session::BrowseSession, CliError> {
+    mgr.status()
+        .map_err(CliError::fatal)?
+        .ok_or_else(|| CliError::fatal("no browse session running; run `omens browse start`"))
+}
+
 pub fn config_doctor() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
