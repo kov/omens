@@ -45,9 +45,10 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
     let command = Command::parse(args).map_err(CliError::fatal)?;
 
     match command {
-        Command::AuthBootstrap { ephemeral, display } => {
-            commands::auth_bootstrap(ephemeral, display)
-        }
+        Command::AuthBootstrap {
+            ephemeral,
+            system_display,
+        } => commands::auth_bootstrap(ephemeral, system_display),
         Command::ExploreStart { url } => commands::explore_start(url),
         Command::ExploreReview => commands::explore_review(),
         Command::ExplorePromote { recipe_id } => commands::explore_promote(recipe_id),
@@ -61,16 +62,16 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::BrowserRollback => commands::browser_rollback(),
         Command::BrowserOpen {
             url,
-            display,
+            system_display,
             extra_args,
-        } => commands::browser_open(url, display, extra_args),
+        } => commands::browser_open(url, system_display, extra_args),
         Command::BrowserResetProfile => commands::browser_reset_profile(),
         Command::DisplayStart { listen_addr } => commands::display_start(listen_addr),
         Command::DisplayStop => commands::display_stop(),
         Command::DisplayStatus => commands::display_status(),
         Command::FetchDoc { url_or_key } => commands::fetch_doc(url_or_key),
         Command::SendEmail { path } => commands::send_email(path),
-        Command::Chat { display } => commands::chat(display),
+        Command::Chat { system_display } => commands::chat(system_display),
         Command::Browse(sub) => commands::browse(sub),
         Command::ConfigDoctor => commands::config_doctor(),
         Command::Help { topic } => {
@@ -86,7 +87,7 @@ fn print_usage(topic: HelpTopic) {
             println!(
                 "Usage:\n  \
   omens run\n  \
-  omens auth bootstrap [--ephemeral] [--display]\n  \
+  omens auth bootstrap [--ephemeral] [--system-display]\n  \
   omens explore start <url-or-ticker>\n  \
   omens explore review\n  \
   omens explore promote <recipe_id>\n  \
@@ -95,15 +96,17 @@ fn print_usage(topic: HelpTopic) {
   omens report since DATE|Nd\n  \
   omens fetch-doc <url-or-stable-key>\n  \
   omens send-email <file>\n  \
-  omens chat [--display]\n  \
+  omens chat [--system-display]\n  \
   omens browse start|stop|status|navigate|content|click|...\n  \
   omens config doctor\n  \
-  omens browser open [url] [--display] [-- CHROMIUM_ARGS...]\n  \
+  omens browser open [url] [--system-display] [-- CHROMIUM_ARGS...]\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
   omens display start|stop|status"
             );
         }
-        HelpTopic::Auth => println!("Usage:\n  omens auth bootstrap [--ephemeral] [--display]"),
+        HelpTopic::Auth => {
+            println!("Usage:\n  omens auth bootstrap [--ephemeral] [--system-display]")
+        }
         HelpTopic::Explore => {
             println!(
                 "Usage:\n  omens explore start <url-or-ticker>\n  omens explore review\n  omens explore promote <recipe_id>"
@@ -115,12 +118,12 @@ fn print_usage(topic: HelpTopic) {
         HelpTopic::Report => {
             println!("Usage:\n  omens report latest\n  omens report since DATE|Nd")
         }
-        HelpTopic::Chat => println!("Usage:\n  omens chat [--display]"),
+        HelpTopic::Chat => println!("Usage:\n  omens chat [--system-display]"),
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
         HelpTopic::Browse => {
             println!(
                 "Usage:\n  \
-  omens browse start [--port PORT] [--display]\n  \
+  omens browse start [--port PORT] [--system-display]\n  \
   omens browse stop\n  \
   omens browse status\n  \
   omens browse navigate <url>\n  \
@@ -137,7 +140,7 @@ fn print_usage(topic: HelpTopic) {
         }
         HelpTopic::Browser => {
             println!(
-                "Usage:\n  omens browser open [url] [--display] [-- CHROMIUM_ARGS...]\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
+                "Usage:\n  omens browser open [url] [--system-display] [-- CHROMIUM_ARGS...]\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
             )
         }
         HelpTopic::Display => println!(
@@ -164,7 +167,7 @@ enum Command {
     Run,
     AuthBootstrap {
         ephemeral: bool,
-        display: bool,
+        system_display: bool,
     },
     ExploreStart {
         url: String,
@@ -188,7 +191,7 @@ enum Command {
         path: String,
     },
     Chat {
-        display: bool,
+        system_display: bool,
     },
     ConfigDoctor,
     BrowserStatus,
@@ -199,7 +202,7 @@ enum Command {
     BrowserRollback,
     BrowserOpen {
         url: Option<String>,
-        display: bool,
+        system_display: bool,
         extra_args: Vec<String>,
     },
     BrowserResetProfile,
@@ -218,7 +221,7 @@ enum Command {
 pub enum BrowseCommand {
     Start {
         port: u16,
-        display: bool,
+        system_display: bool,
     },
     Stop,
     Status,
@@ -322,19 +325,24 @@ fn parse_auth(args: &[String]) -> Result<Command, String> {
     }
     if args.len() >= 3 && args[2] == "bootstrap" {
         let mut ephemeral = false;
-        let mut display = false;
+        let mut system_display = false;
         for arg in args.iter().skip(3) {
             match arg.as_str() {
                 "--ephemeral" => ephemeral = true,
-                "--display" => display = true,
+                "--system-display" => system_display = true,
                 _ => {
-                    return Err("usage: omens auth bootstrap [--ephemeral] [--display]".to_string());
+                    return Err(
+                        "usage: omens auth bootstrap [--ephemeral] [--system-display]".to_string(),
+                    );
                 }
             }
         }
-        return Ok(Command::AuthBootstrap { ephemeral, display });
+        return Ok(Command::AuthBootstrap {
+            ephemeral,
+            system_display,
+        });
     }
-    Err("usage: omens auth bootstrap [--ephemeral] [--display]".to_string())
+    Err("usage: omens auth bootstrap [--ephemeral] [--system-display]".to_string())
 }
 
 fn parse_explore(args: &[String]) -> Result<Command, String> {
@@ -453,14 +461,14 @@ fn parse_chat(args: &[String]) -> Result<Command, String> {
             topic: HelpTopic::Chat,
         });
     }
-    let mut display = false;
+    let mut system_display = false;
     for arg in args.iter().skip(2) {
         match arg.as_str() {
-            "--display" => display = true,
-            _ => return Err("usage: omens chat [--display]".to_string()),
+            "--system-display" => system_display = true,
+            _ => return Err("usage: omens chat [--system-display]".to_string()),
         }
     }
-    Ok(Command::Chat { display })
+    Ok(Command::Chat { system_display })
 }
 
 fn parse_config(args: &[String]) -> Result<Command, String> {
@@ -489,7 +497,7 @@ fn parse_browse(args: &[String]) -> Result<Command, String> {
     match args[2].as_str() {
         "start" => {
             let mut port = 9222u16;
-            let mut display = false;
+            let mut system_display = false;
             let mut i = 3usize;
             while i < args.len() {
                 match args[i].as_str() {
@@ -502,18 +510,20 @@ fn parse_browse(args: &[String]) -> Result<Command, String> {
                             .map_err(|_| format!("invalid port: {val}"))?;
                         i += 2;
                     }
-                    "--display" => {
-                        display = true;
+                    "--system-display" => {
+                        system_display = true;
                         i += 1;
                     }
                     _ => {
-                        return Err(
-                            "usage: omens browse start [--port PORT] [--display]".to_string()
-                        );
+                        return Err("usage: omens browse start [--port PORT] [--system-display]"
+                            .to_string());
                     }
                 }
             }
-            Ok(Command::Browse(BrowseCommand::Start { port, display }))
+            Ok(Command::Browse(BrowseCommand::Start {
+                port,
+                system_display,
+            }))
         }
         "stop" => {
             if args.len() != 3 {
@@ -687,7 +697,7 @@ fn parse_browser(args: &[String]) -> Result<Command, String> {
 
     if args.len() >= 3 && args[2] == "open" {
         let mut url = None;
-        let mut display = false;
+        let mut system_display = false;
         let mut extra_args = Vec::new();
         let mut after_dashdash = false;
         for arg in args.iter().skip(3) {
@@ -697,11 +707,11 @@ fn parse_browser(args: &[String]) -> Result<Command, String> {
             }
             match arg.as_str() {
                 "--" => after_dashdash = true,
-                "--display" => display = true,
+                "--system-display" => system_display = true,
                 _ if url.is_none() && !arg.starts_with('-') => url = Some(arg.clone()),
                 _ => {
                     return Err(
-                        "usage: omens browser open [url] [--display] [-- CHROMIUM_ARGS...]"
+                        "usage: omens browser open [url] [--system-display] [-- CHROMIUM_ARGS...]"
                             .to_string(),
                     );
                 }
@@ -709,7 +719,7 @@ fn parse_browser(args: &[String]) -> Result<Command, String> {
         }
         return Ok(Command::BrowserOpen {
             url,
-            display,
+            system_display,
             extra_args,
         });
     }
@@ -856,19 +866,24 @@ mod tests {
                 .expect("auth should parse"),
             Command::AuthBootstrap {
                 ephemeral: true,
-                display: false
+                system_display: false
             }
         ));
     }
 
     #[test]
-    fn parse_auth_display_flag() {
+    fn parse_auth_system_display_flag() {
         assert!(matches!(
-            Command::parse(&to_args(&["omens", "auth", "bootstrap", "--display"]))
-                .expect("auth should parse"),
+            Command::parse(&to_args(&[
+                "omens",
+                "auth",
+                "bootstrap",
+                "--system-display"
+            ]))
+            .expect("auth should parse"),
             Command::AuthBootstrap {
                 ephemeral: false,
-                display: true
+                system_display: true
             }
         ));
     }
@@ -964,7 +979,7 @@ mod tests {
             Command::parse(&to_args(&["omens", "browser", "open"])).expect("should parse"),
             Command::BrowserOpen {
                 url: None,
-                display: false,
+                system_display: false,
                 ..
             }
         ));
@@ -980,22 +995,26 @@ mod tests {
         ]))
         .expect("should parse");
         match cmd {
-            Command::BrowserOpen { url, display, .. } => {
+            Command::BrowserOpen {
+                url,
+                system_display,
+                ..
+            } => {
                 assert_eq!(url, Some("https://example.com".to_string()));
-                assert!(!display);
+                assert!(!system_display);
             }
             _ => panic!("unexpected variant"),
         }
     }
 
     #[test]
-    fn parse_browser_open_with_display() {
+    fn parse_browser_open_with_system_display() {
         assert!(matches!(
-            Command::parse(&to_args(&["omens", "browser", "open", "--display"]))
+            Command::parse(&to_args(&["omens", "browser", "open", "--system-display"]))
                 .expect("should parse"),
             Command::BrowserOpen {
                 url: None,
-                display: true,
+                system_display: true,
                 ..
             }
         ));
@@ -1008,13 +1027,17 @@ mod tests {
             "browser",
             "open",
             "https://example.com",
-            "--display",
+            "--system-display",
         ]))
         .expect("should parse");
         match cmd {
-            Command::BrowserOpen { url, display, .. } => {
+            Command::BrowserOpen {
+                url,
+                system_display,
+                ..
+            } => {
                 assert_eq!(url, Some("https://example.com".to_string()));
-                assert!(display);
+                assert!(system_display);
             }
             _ => panic!("unexpected variant"),
         }

@@ -48,7 +48,7 @@ struct CollectStats {
 
 // ── Command implementations ──────────────────────────────────────────────────
 
-pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
+pub fn auth_bootstrap(ephemeral: bool, system_display: bool) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
@@ -74,7 +74,7 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
         ephemeral_profile = None;
     }
 
-    let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, system_display)?;
 
     let mut harness = ChromiumoxideHarness::new(
         browser_binary,
@@ -117,7 +117,7 @@ pub fn auth_bootstrap(ephemeral: bool, display: bool) -> Result<(), CliError> {
 
 pub fn browser_open(
     url: Option<String>,
-    display: bool,
+    system_display: bool,
     cli_extra_args: Vec<String>,
 ) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
@@ -149,7 +149,7 @@ pub fn browser_open(
 
     cmd.arg(target);
 
-    let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, system_display)?;
     for (key, value) in &launch_env {
         cmd.env(key, value);
     }
@@ -1262,7 +1262,7 @@ pub fn send_email(path: String) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn chat(display: bool) -> Result<(), CliError> {
+pub fn chat(system_display: bool) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
@@ -1288,7 +1288,7 @@ pub fn chat(display: bool) -> Result<(), CliError> {
         ))
     })?;
 
-    let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
+    let launch_env = display_launch_env(&loaded.resolved.root_dir, system_display)?;
 
     let mut harness = ChromiumoxideHarness::new(
         browser_binary,
@@ -1314,12 +1314,15 @@ pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
     let session_mgr = BrowseSessionManager::new(&loaded.resolved.root_dir);
 
     match cmd {
-        super::BrowseCommand::Start { port, display } => {
+        super::BrowseCommand::Start {
+            port,
+            system_display,
+        } => {
             let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
             let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
             let profile_dir = manager.default_profile_dir().to_path_buf();
 
-            let launch_env = display_launch_env(&loaded.resolved.root_dir, display)?;
+            let launch_env = display_launch_env(&loaded.resolved.root_dir, system_display)?;
 
             let mut extra_args = loaded.browser.extra_args.clone();
             if !launch_env.is_empty() {
@@ -1416,40 +1419,33 @@ pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
     }
 }
 
-/// Resolve display environment variables for browser launch.
+/// Returns display environment variables for browser launch.
 ///
-/// When `require` is true, fails if no display session is running.
-/// When false, returns env pairs if a session exists, or an empty vec otherwise.
+/// When `system_display` is true, inherits the caller's display environment
+/// (e.g. DISPLAY or WAYLAND_DISPLAY already set in the process) and returns
+/// an empty vec — the browser will use whatever display the system provides.
+///
+/// Otherwise, ensures a managed Weston RDP display is running (auto-starting
+/// it if needed) and returns the env vars pointing at it.
 fn display_launch_env(
     root_dir: &std::path::Path,
-    require: bool,
+    system_display: bool,
 ) -> Result<Vec<(String, String)>, CliError> {
-    let dm = DisplayManager::new(root_dir);
-    if require {
-        let status = dm.status().map_err(CliError::fatal)?;
-        let session = status.session.ok_or_else(|| {
-            CliError::fatal("display session is not running; run `omens display start`")
-        })?;
-        Ok(vec![
-            (
-                "XDG_RUNTIME_DIR".to_string(),
-                session.runtime_dir.display().to_string(),
-            ),
-            ("WAYLAND_DISPLAY".to_string(), session.wayland_socket),
-        ])
-    } else if let Ok(status) = dm.status()
-        && let Some(session) = status.session
-    {
-        Ok(vec![
-            (
-                "XDG_RUNTIME_DIR".to_string(),
-                session.runtime_dir.display().to_string(),
-            ),
-            ("WAYLAND_DISPLAY".to_string(), session.wayland_socket),
-        ])
-    } else {
-        Ok(vec![])
+    if system_display {
+        return Ok(vec![]);
     }
+
+    let dm = DisplayManager::new(root_dir);
+    let session = dm
+        .ensure_running(crate::runtime::display_manager::DEFAULT_LISTEN_ADDR)
+        .map_err(CliError::fatal)?;
+    Ok(vec![
+        (
+            "XDG_RUNTIME_DIR".to_string(),
+            session.runtime_dir.display().to_string(),
+        ),
+        ("WAYLAND_DISPLAY".to_string(), session.wayland_socket),
+    ])
 }
 
 fn require_session(

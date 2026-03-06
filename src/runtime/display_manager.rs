@@ -18,6 +18,8 @@ pub struct DisplayStatus {
     pub session: Option<DisplaySession>,
 }
 
+pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:3389";
+
 pub struct DisplayManager {
     display_dir: PathBuf,
     state_file: PathBuf,
@@ -128,6 +130,15 @@ impl DisplayManager {
         };
         self.write_state(&session)?;
         Ok(session)
+    }
+
+    /// Returns the existing session if one is running, or starts a new one.
+    pub fn ensure_running(&self, listen_addr: &str) -> Result<DisplaySession, String> {
+        let status = self.status()?;
+        if let Some(session) = status.session {
+            return Ok(session);
+        }
+        self.start(listen_addr)
     }
 
     pub fn stop(&self) -> Result<(), String> {
