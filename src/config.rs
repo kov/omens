@@ -8,9 +8,6 @@ mod defaults {
     pub fn clubefii_base_url() -> String {
         "https://www.clubefii.com.br".to_string()
     }
-    pub fn clubefii_login_url() -> String {
-        "https://www.clubefii.com.br/login".to_string()
-    }
     pub fn browser_mode() -> String {
         "system".to_string()
     }
@@ -141,8 +138,6 @@ impl Default for ChatConfig {
 pub struct ClubeFiiConfig {
     #[serde(default = "defaults::clubefii_base_url")]
     pub base_url: String,
-    #[serde(default = "defaults::clubefii_login_url")]
-    pub login_url: String,
     #[serde(default)]
     pub auth_marker: Option<String>,
     #[serde(default)]
@@ -153,7 +148,6 @@ impl Default for ClubeFiiConfig {
     fn default() -> Self {
         Self {
             base_url: defaults::clubefii_base_url(),
-            login_url: defaults::clubefii_login_url(),
             auth_marker: None,
             protected_probe_url: None,
         }

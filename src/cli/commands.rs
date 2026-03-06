@@ -695,7 +695,11 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
         }
         Err(err) => {
             let _ = store.finish_run(run_id, RunStatus::Failed, ended, Some(err.as_str()));
-            Err(CliError::fatal(err))
+            if err.contains("re-authenticate with") {
+                Err(CliError::auth_required(err))
+            } else {
+                Err(CliError::fatal(err))
+            }
         }
     }
 }
@@ -763,6 +767,8 @@ fn do_collect(
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
         harness.dismiss_overlays();
+
+        check_page_auth(&harness).map_err(|e| e.message)?;
 
         for recipe in &active_recipes {
             let section = &recipe.section;
@@ -1448,6 +1454,34 @@ fn display_launch_env(
     ])
 }
 
+/// Check whether the current clubefii page indicates the user is not logged in
+/// or is stuck on a bot-verification challenge page.
+/// Returns `Err(CliError::auth_required)` if the session appears invalid.
+fn check_page_auth(harness: &ChromiumoxideHarness) -> Result<(), CliError> {
+    let js = r#"(function() {
+        var tools = document.querySelector('#tools');
+        if (tools && tools.textContent.includes('ENTRAR')) return 'login';
+        var body = document.body ? document.body.textContent : '';
+        if (body.includes('security verification') || body.includes('not a bot')) return 'challenge';
+        if (!tools) return 'no-nav';
+        return 'ok';
+    })()"#;
+    let result = harness.evaluate_js(js).map_err(CliError::fatal)?;
+    let status = result.trim().trim_matches('"');
+    match status {
+        "login" => Err(CliError::auth_required(
+            "session expired; re-authenticate with `omens auth bootstrap`",
+        )),
+        "challenge" => Err(CliError::auth_required(
+            "blocked by bot verification; re-authenticate with `omens auth bootstrap`",
+        )),
+        "no-nav" => Err(CliError::auth_required(
+            "page did not load (no navigation bar); re-authenticate with `omens auth bootstrap`",
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn require_session(
     mgr: &crate::browse::session::BrowseSessionManager,
 ) -> Result<crate::browse::session::BrowseSession, CliError> {
@@ -1729,6 +1763,11 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
     harness.launch(&initial_url).map_err(CliError::fatal)?;
     std::thread::sleep(Duration::from_secs(3));
     harness.dismiss_overlays();
+
+    // Detect expired/missing login before attempting any tab navigation.
+    if !is_url {
+        check_page_auth(&harness)?;
+    }
 
     // For stable_key: navigate list page, click the tab, and find the document link.
     let doc_url = if !is_url {

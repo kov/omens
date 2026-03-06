@@ -7,7 +7,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone)]
 pub struct AuthValidationConfig {
     pub base_url: String,
-    pub login_url: String,
     pub required_marker: Option<String>,
     pub protected_probe_url: Option<String>,
     pub login_timeout: Duration,
@@ -34,12 +33,6 @@ pub fn validate_session(
     config: &AuthValidationConfig,
 ) -> Result<(), AuthError> {
     let current_url = browser.current_url().map_err(AuthError::Runtime)?;
-    if current_url.starts_with(config.login_url.as_str()) {
-        return Err(AuthError::AuthRequired(format!(
-            "session redirected to login URL {}; run `omens auth bootstrap`",
-            config.login_url
-        )));
-    }
     if !current_url.starts_with(config.base_url.as_str()) {
         return Err(AuthError::AuthRequired(format!(
             "session URL `{current_url}` is outside expected base URL {}; run `omens auth bootstrap`",
@@ -255,7 +248,6 @@ mod tests {
     fn base_config() -> AuthValidationConfig {
         AuthValidationConfig {
             base_url: "https://www.clubefii.com.br".to_string(),
-            login_url: "https://www.clubefii.com.br/login".to_string(),
             required_marker: None,
             protected_probe_url: None,
             login_timeout: Duration::from_millis(50),
@@ -275,8 +267,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_session_rejects_login_redirect() {
-        let harness = MockHarness::new(vec!["https://www.clubefii.com.br/login"], true, true);
+    fn validate_session_rejects_foreign_url() {
+        let harness = MockHarness::new(vec!["https://example.com/other"], true, true);
         let err = validate_session(&harness, &base_config()).expect_err("should fail");
         assert!(matches!(err, AuthError::AuthRequired(_)));
     }
@@ -292,11 +284,11 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_login_succeeds_after_redirect_clears() {
+    fn wait_for_login_succeeds_after_foreign_url_clears() {
         let harness = MockHarness::new(
             vec![
-                "https://www.clubefii.com.br/login",
-                "https://www.clubefii.com.br/login",
+                "https://example.com/captcha",
+                "https://example.com/captcha",
                 "https://www.clubefii.com.br/home",
             ],
             true,
@@ -308,7 +300,7 @@ mod tests {
 
     #[test]
     fn wait_for_login_times_out() {
-        let harness = MockHarness::new(vec!["https://www.clubefii.com.br/login"], true, true);
+        let harness = MockHarness::new(vec!["https://example.com/stuck"], true, true);
         let err = wait_for_login(&harness, &base_config()).expect_err("should timeout");
         assert!(matches!(err, AuthError::AuthRequired(_)));
     }
