@@ -10,23 +10,28 @@ OUTPUT_DIR="$HOME/Documents/omens"
 OUTPUT_FILE="$OUTPUT_DIR/$DATE.md"
 PROMPT_FILE="$HOME/.cache/omens/prompt.txt"
 
+EX_AUTH_REQUIRED=20
+
 mkdir -p "$OUTPUT_DIR" "$HOME/.cache/omens/docs"
 
 # ---------------------------------------------------------------------------
-# Phase 1 — Collect (runs outside bwrap, needs full display/browser access)
+# Phase 1 — Collect (display auto-starts as needed)
 # ---------------------------------------------------------------------------
 
-DISPLAY_STARTED=false
-if "$OMENS" display start 2>/dev/null; then
-    DISPLAY_STARTED=true
-    echo "[$(date -Iseconds)] Display started."
-else
-    echo "[$(date -Iseconds)] Display already running, skipping start."
-fi
-trap 'if $DISPLAY_STARTED; then "$OMENS" display stop && echo "[$(date -Iseconds)] Display stopped."; fi' EXIT
-
 echo "[$(date -Iseconds)] Running full pipeline (collect + report)..."
-"$OMENS" run
+rc=0
+"$OMENS" run || rc=$?
+
+if [[ $rc -eq $EX_AUTH_REQUIRED ]]; then
+    echo "[$(date -Iseconds)] Auth expired — sending alert email."
+    printf '# omens — sessão expirada (%s)\n\nA sessão do clubefii.com.br expirou.\nExecute `omens auth bootstrap` para re-autenticar.\n' "$DATE" \
+        > "$OUTPUT_FILE"
+    "$OMENS" send-email "$OUTPUT_FILE"
+    exit $EX_AUTH_REQUIRED
+elif [[ $rc -ne 0 ]]; then
+    echo "[$(date -Iseconds)] Pipeline failed (exit $rc)." >&2
+    exit $rc
+fi
 
 echo "[$(date -Iseconds)] Collect complete."
 
