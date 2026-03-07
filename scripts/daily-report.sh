@@ -43,8 +43,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Build prompt file (written directly to avoid variable size limits)
+# Phase 2+3 — Build prompt and run Claude analysis (skip if report exists)
 # ---------------------------------------------------------------------------
+
+is_valid_report() { grep -q '^#' "$1" 2>/dev/null; }
+
+if is_valid_report "$OUTPUT_FILE"; then
+    echo "[$(date -Iseconds)] Claude analysis already exists, skipping."
+else
 
 REPORT_FILE="$HOME/.omens/reports/latest.md"
 if [[ ! -f "$REPORT_FILE" ]]; then
@@ -143,15 +149,6 @@ Do not write files or modify anything. Output your analysis to stdout.
 EOF
 } > "$PROMPT_FILE"
 
-# ---------------------------------------------------------------------------
-# Phase 3 — Run Claude inside bwrap (read-only FS except /tmp and ~/.claude)
-# ---------------------------------------------------------------------------
-
-is_valid_report() { grep -q '^#' "$1" 2>/dev/null; }
-
-if is_valid_report "$OUTPUT_FILE"; then
-    echo "[$(date -Iseconds)] Claude analysis already exists, skipping."
-else
     rm -f "$OUTPUT_FILE"
     MAX_RETRIES=3
     for attempt in $(seq 1 "$MAX_RETRIES"); do

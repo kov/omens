@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chromiumoxide::cdp::browser_protocol::network::{
-    EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
+    CookieParam, EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent, TimeSinceEpoch,
 };
 use chromiumoxide::{Browser, BrowserConfig, Page};
 
@@ -157,6 +157,124 @@ impl ChromiumoxideHarness {
             .as_ref()
             .ok_or_else(|| "browser page is not initialized".to_string())
     }
+
+    fn browser(&self) -> Result<&Browser, String> {
+        self.browser
+            .as_ref()
+            .ok_or_else(|| "browser is not initialized".to_string())
+    }
+
+    /// Hide automation signals (navigator.webdriver, etc.) to avoid bot detection.
+    pub fn enable_stealth(&self) -> Result<(), String> {
+        let page = self.page()?.clone();
+        self.runtime.block_on(async {
+            page.enable_stealth_mode_with_agent("")
+                .await
+                .map_err(|e| format!("failed to enable stealth mode: {e}"))
+        })
+    }
+
+    /// Fetch a URL via the browser's JS context (inherits cookies/CF clearance).
+    /// Returns the raw response bytes.
+    pub fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, String> {
+        let page = self.page()?.clone();
+        let url_json = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+        let js = format!(
+            r#"(async () => {{
+                const resp = await fetch({url_json});
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const buf = await resp.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                const chunks = [];
+                for (let i = 0; i < bytes.length; i += 8192) {{
+                    chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
+                }}
+                return btoa(chunks.join(''));
+            }})()"#
+        );
+        self.runtime.block_on(async {
+            let result = page
+                .evaluate(js)
+                .await
+                .map_err(|e| format!("browser fetch of {url} failed: {e}"))?;
+            let value: serde_json::Value = result.into_value().unwrap_or(serde_json::Value::Null);
+            let b64 = match value {
+                serde_json::Value::String(s) => s,
+                other => return Err(format!("unexpected fetch result: {other}")),
+            };
+            use base64::Engine as _;
+            let mut bytes = base64::engine::general_purpose::STANDARD
+                .decode(&b64)
+                .map_err(|e| format!("base64 decode: {e}"))?;
+
+            // Some servers (e.g. FNET) return a JSON-encoded base64 string rather
+            // than raw bytes. Detect this (decoded bytes start with '"') and unwrap.
+            if bytes.starts_with(b"\"") {
+                let s = String::from_utf8_lossy(&bytes);
+                let inner: String = serde_json::from_str(s.as_ref())
+                    .map_err(|e| format!("JSON-wrapped response: {e}"))?;
+                bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&inner)
+                    .map_err(|e| format!("inner base64 decode: {e}"))?;
+            }
+
+            Ok(bytes)
+        })
+    }
+
+    /// Make session cookies persistent so they survive browser restarts.
+    /// Returns the number of cookies that were made persistent.
+    pub fn persist_session_cookies(&self, domain_filter: &str) -> Result<usize, String> {
+        let browser = self.browser()?;
+        let filter = domain_filter.to_string();
+        self.runtime.block_on(async {
+            let cookies = browser
+                .get_cookies()
+                .await
+                .map_err(|e| format!("failed to get cookies: {e}"))?;
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "system time before epoch".to_string())?
+                .as_secs_f64();
+            let thirty_days = 30.0 * 24.0 * 3600.0;
+
+            let session_cookies: Vec<_> = cookies
+                .iter()
+                .filter(|c| c.session && c.domain.contains(&filter))
+                .collect();
+
+            if session_cookies.is_empty() {
+                return Ok(0);
+            }
+
+            let count = session_cookies.len();
+            let params: Vec<CookieParam> = session_cookies
+                .into_iter()
+                .map(|c| {
+                    let mut builder = CookieParam::builder()
+                        .name(&c.name)
+                        .value(&c.value)
+                        .domain(&c.domain)
+                        .path(&c.path)
+                        .secure(c.secure)
+                        .http_only(c.http_only)
+                        .expires(TimeSinceEpoch::new(now + thirty_days));
+                    if let Some(ss) = c.same_site.clone() {
+                        builder = builder.same_site(ss);
+                    }
+                    builder.build().expect("cookie param should build")
+                })
+                .collect();
+
+            browser
+                .set_cookies(params)
+                .await
+                .map_err(|e| format!("failed to set cookies: {e}"))?;
+
+            Ok(count)
+        })
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -194,7 +312,8 @@ impl BrowserHarness for ChromiumoxideHarness {
             .chrome_executable(&self.browser_binary)
             .user_data_dir(&self.profile_dir)
             .viewport(None)
-            .with_head();
+            .with_head()
+            .arg(("disable-blink-features", "AutomationControlled"));
         let has_wayland = self.launch_env.iter().any(|(k, _)| k == "WAYLAND_DISPLAY");
         if has_wayland {
             builder = builder

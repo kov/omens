@@ -13,6 +13,14 @@ use std::time::{Duration, SystemTime};
 
 use super::CliError;
 
+const FNET_LANDING_URL: &str = "https://fnet.bmfbovespa.com.br/fnet/publico/pesquisarGerenciadorDocumentosCVM?paginaCertificados=false&tipoFundo=1";
+
+fn is_fnet_url(url: &str) -> bool {
+    url.contains("fnet.bmfbovespa.com.br")
+        || url.contains("bvmf.bmfbovespa.com.br")
+        || url.contains("b3.com.br")
+}
+
 // ── Recipe selector JSON deserialization ────────────────────────────────────
 
 #[derive(Deserialize, Default)]
@@ -84,11 +92,12 @@ pub fn auth_bootstrap(ephemeral: bool, system_display: bool) -> Result<(), CliEr
     )
     .map_err(CliError::fatal)?;
     harness
-        .launch(loaded.clubefii.login_url.as_str())
+        .launch(loaded.clubefii.base_url.as_str())
         .map_err(CliError::fatal)?;
+    harness.enable_stealth().map_err(CliError::fatal)?;
 
     println!("auth bootstrap");
-    println!("  opened login URL: {}", loaded.clubefii.login_url);
+    println!("  opened: {}", loaded.clubefii.base_url);
     println!("  profile: {}", profile_path.display());
     println!("  complete login in the browser, then press Enter here to validate session.");
 
@@ -99,7 +108,6 @@ pub fn auth_bootstrap(ephemeral: bool, system_display: bool) -> Result<(), CliEr
 
     let auth_config = AuthValidationConfig {
         base_url: loaded.clubefii.base_url.clone(),
-        login_url: loaded.clubefii.login_url.clone(),
         required_marker: loaded.clubefii.auth_marker.clone(),
         protected_probe_url: loaded.clubefii.protected_probe_url.clone(),
         login_timeout: Duration::from_secs(120),
@@ -107,6 +115,15 @@ pub fn auth_bootstrap(ephemeral: bool, system_display: bool) -> Result<(), CliEr
     };
 
     let result = auth::wait_for_login(&harness, &auth_config).map_err(map_auth_error);
+
+    if result.is_ok() {
+        match harness.persist_session_cookies("clubefii") {
+            Ok(n) if n > 0 => println!("  persisted {n} session cookie(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("  warning: failed to persist session cookies: {e}"),
+        }
+    }
+
     let _ = harness.shutdown();
     drop(ephemeral_profile);
 
@@ -207,6 +224,7 @@ pub fn explore_start(url: String) -> Result<(), CliError> {
 
     println!("explore start: {url}");
     harness.launch(&url).map_err(CliError::fatal)?;
+    let _ = harness.enable_stealth();
 
     // Wait for initial page load, then dismiss any blocking overlays
     std::thread::sleep(std::time::Duration::from_secs(3));
@@ -761,6 +779,7 @@ fn do_collect(
 
         if first {
             harness.launch(&fund_url).map_err(|e| e.to_string())?;
+            let _ = harness.enable_stealth();
             first = false;
         } else {
             harness.navigate(&fund_url).map_err(|e| e.to_string())?;
@@ -1753,6 +1772,16 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
             .ok_or_else(|| CliError::fatal("item has no source URL stored in DB"))?
     };
 
+    // For FNET URLs, avoid navigating Chrome directly to PDF-serving pages
+    // (Chrome dumps PDF content to stdout). Instead, land on a neutral HTML page
+    // on the same domain to pass Cloudflare, then use JS fetch for the document.
+    let is_fnet_direct = is_url && is_fnet_url(&initial_url);
+    let launch_url = if is_fnet_direct {
+        "about:blank".to_string()
+    } else {
+        initial_url.clone()
+    };
+
     let mut harness = ChromiumoxideHarness::new(
         browser_binary,
         profile_path,
@@ -1760,8 +1789,14 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
         loaded.browser.extra_args.clone(),
     )
     .map_err(CliError::fatal)?;
-    harness.launch(&initial_url).map_err(CliError::fatal)?;
-    std::thread::sleep(Duration::from_secs(3));
+    harness.launch(&launch_url).map_err(CliError::fatal)?;
+    let _ = harness.enable_stealth();
+    if is_fnet_direct {
+        harness
+            .navigate(FNET_LANDING_URL)
+            .map_err(CliError::fatal)?;
+    }
+    std::thread::sleep(Duration::from_secs(5));
     harness.dismiss_overlays();
 
     // Detect expired/missing login before attempting any tab navigation.
@@ -1833,6 +1868,9 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
             .map_err(CliError::fatal)?
         {
             Some(href) => {
+                // URLs extracted from onclick handlers may span multiple lines;
+                // keep only the first line and trim whitespace.
+                let href = href.lines().next().unwrap_or(&href).trim().to_string();
                 eprintln!("fetch-doc: found document link: {href}");
                 href
             }
@@ -1858,16 +1896,26 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
     }
 
     // Navigate to the document URL if we haven't already.
-    if !is_url || doc_url != url_or_key {
+    // For FNET URLs, navigate to the landing page (not the PDF URL) to avoid
+    // Chrome dumping PDF content to stdout, then use JS fetch for the document.
+    let doc_is_fnet = is_fnet_url(&doc_url);
+    if doc_is_fnet && !is_fnet_direct {
+        harness
+            .navigate(FNET_LANDING_URL)
+            .map_err(CliError::fatal)?;
+        std::thread::sleep(Duration::from_secs(5));
+    } else if !doc_is_fnet && (!is_url || doc_url != url_or_key) {
         harness.navigate(&doc_url).map_err(CliError::fatal)?;
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(Duration::from_secs(5));
     }
 
     let text = fetch_doc_extract_text(&harness, &doc_url)?;
 
     harness.shutdown().ok();
 
-    let _ = std::fs::write(&cache_path, &text);
+    if !text.trim().is_empty() {
+        let _ = std::fs::write(&cache_path, &text);
+    }
     print!("{text}");
     Ok(())
 }
@@ -1885,36 +1933,36 @@ fn fetch_doc_extract_text(harness: &ChromiumoxideHarness, url: &str) -> Result<S
             )
             .map_err(CliError::fatal)?;
         if let Some(href) = link {
-            if href.contains(".pdf") || href.contains("exibirDocumento") {
-                return fetch_doc_pdf_to_text(&href);
-            }
-            // Might be an FNET page URL — recurse once.
-            harness.navigate(&href).map_err(CliError::fatal)?;
-            std::thread::sleep(Duration::from_secs(3));
+            // For FNET links, navigate to the landing page (not the PDF URL) to
+            // avoid Chrome dumping PDF content to stdout.
+            let nav_target = if is_fnet_url(&href) {
+                FNET_LANDING_URL
+            } else {
+                &href
+            };
+            harness.navigate(nav_target).map_err(CliError::fatal)?;
+            std::thread::sleep(Duration::from_secs(5));
             return fetch_doc_extract_text(harness, &href);
         }
         // Fall back to page text (the embed page might have inline text).
         let html = harness.page_source().map_err(CliError::fatal)?;
         Ok(html_to_text(&html))
-    } else if url.contains("fnet.bmfbovespa.com.br")
-        || url.contains("bvmf.bmfbovespa.com.br")
-        || url.contains("b3.com.br")
-        || url.ends_with(".pdf")
-    {
-        // FNET/B3 document page: these URLs often serve PDFs directly.  Try
-        // reqwest first; if the response looks like a PDF, pipe through pdftotext.
-        // Fall back to extracting text from the HTML page source.
-        match fetch_doc_pdf_to_text(url) {
+    } else if is_fnet_url(url) || url.ends_with(".pdf") {
+        // FNET/B3 document page — browser already navigated here with stealth.
+        // Most FNET URLs serve PDFs (even exibirDocumento). Try browser JS fetch
+        // first; it handles both PDF and HTML responses.
+        match fetch_doc_pdf_via_browser(harness, url) {
             Ok(text) if !text.trim().is_empty() => return Ok(text),
             _ => {}
         }
-        // Maybe the page has a PDF download link (FNET viewer pattern).
+        // Maybe the page has a separate PDF download link.
         let pdf_link = harness
             .find_link_href("a[href$='.pdf'], #lnkDownload, a[href*='download']")
             .map_err(CliError::fatal)?;
         if let Some(href) = pdf_link {
-            return fetch_doc_pdf_to_text(&href);
+            return fetch_doc_pdf_via_browser(harness, &href);
         }
+        // Last resort: extract text from page source.
         let html = harness.page_source().map_err(CliError::fatal)?;
         Ok(html_to_text(&html))
     } else {
@@ -1923,50 +1971,23 @@ fn fetch_doc_extract_text(harness: &ChromiumoxideHarness, url: &str) -> Result<S
     }
 }
 
-/// Download a document from `url` using reqwest (with browser-like headers).
-/// If the response content-type is PDF (or the first bytes are `%PDF`), convert
-/// via `pdftotext -layout`; otherwise treat as HTML.
-fn fetch_doc_pdf_to_text(url: &str) -> Result<String, CliError> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        )
-        .build()
-        .map_err(|e| CliError::fatal(format!("reqwest client: {e}")))?;
-    let resp = client
-        .get(url)
-        .header("Referer", "https://www.clubefii.com.br/")
-        .send()
-        .map_err(|e| CliError::fatal(format!("fetch {url}: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(CliError::fatal(format!(
-            "HTTP {} fetching document URL: {url}",
-            resp.status()
-        )));
-    }
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-    let bytes = resp
-        .bytes()
-        .map_err(|e| CliError::fatal(format!("reading response body: {e}")))?;
+/// Download a document via the browser's JS fetch (inherits Cloudflare cookies).
+/// If the response is PDF, convert via `pdftotext -layout`; otherwise treat as HTML.
+fn fetch_doc_pdf_via_browser(
+    harness: &ChromiumoxideHarness,
+    url: &str,
+) -> Result<String, CliError> {
+    let bytes = harness
+        .fetch_bytes(url)
+        .map_err(|e| CliError::fatal(format!("browser fetch {url}: {e}")))?;
 
-    // Detect PDF by content-type or magic bytes.
-    let is_pdf = content_type.contains("pdf") || bytes.starts_with(b"%PDF");
-
-    if !is_pdf {
-        // Treat as HTML.
+    if !bytes.starts_with(b"%PDF") {
         let html = String::from_utf8_lossy(&bytes).into_owned();
         return Ok(html_to_text(&html));
     }
 
-    // Write to a temp file keyed on URL hash.
     let tmp_path = format!("/tmp/omens-doc-{}.pdf", store::content_hash_fnv(url));
-    std::fs::write(&tmp_path, bytes.as_ref())
+    std::fs::write(&tmp_path, &bytes)
         .map_err(|e| CliError::fatal(format!("write temp PDF: {e}")))?;
 
     let output = std::process::Command::new("pdftotext")
