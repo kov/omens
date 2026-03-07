@@ -18,22 +18,29 @@ mkdir -p "$OUTPUT_DIR" "$HOME/.cache/omens/docs"
 # Phase 1 — Collect (display auto-starts as needed)
 # ---------------------------------------------------------------------------
 
-echo "[$(date -Iseconds)] Running full pipeline (collect + report)..."
-rc=0
-"$OMENS" run || rc=$?
+RUN_TODAY=$(sqlite3 ~/.omens/db/omens.db \
+    "SELECT COUNT(*) FROM runs WHERE date(started_at, 'unixepoch', 'localtime') = '$DATE' AND status = 'success'")
 
-if [[ $rc -eq $EX_AUTH_REQUIRED ]]; then
-    echo "[$(date -Iseconds)] Auth expired — sending alert email."
-    printf '# omens — sessão expirada (%s)\n\nA sessão do clubefii.com.br expirou.\nExecute `omens auth bootstrap` para re-autenticar.\n' "$DATE" \
-        > "$OUTPUT_FILE"
-    "$OMENS" send-email "$OUTPUT_FILE"
-    exit $EX_AUTH_REQUIRED
-elif [[ $rc -ne 0 ]]; then
-    echo "[$(date -Iseconds)] Pipeline failed (exit $rc)." >&2
-    exit $rc
+if [[ "$RUN_TODAY" -gt 0 ]]; then
+    echo "[$(date -Iseconds)] Collect already succeeded today, skipping."
+else
+    echo "[$(date -Iseconds)] Running full pipeline (collect + report)..."
+    rc=0
+    "$OMENS" run || rc=$?
+
+    if [[ $rc -eq $EX_AUTH_REQUIRED ]]; then
+        echo "[$(date -Iseconds)] Auth expired — sending alert email."
+        printf '# omens — sessão expirada (%s)\n\nA sessão do clubefii.com.br expirou.\nExecute `omens auth bootstrap` para re-autenticar.\n' "$DATE" \
+            > "$OUTPUT_FILE"
+        "$OMENS" send-email "$OUTPUT_FILE"
+        exit $EX_AUTH_REQUIRED
+    elif [[ $rc -ne 0 ]]; then
+        echo "[$(date -Iseconds)] Pipeline failed (exit $rc)." >&2
+        exit $rc
+    fi
+
+    echo "[$(date -Iseconds)] Collect complete."
 fi
-
-echo "[$(date -Iseconds)] Collect complete."
 
 # ---------------------------------------------------------------------------
 # Phase 2 — Build prompt file (written directly to avoid variable size limits)
@@ -140,30 +147,66 @@ EOF
 # Phase 3 — Run Claude inside bwrap (read-only FS except /tmp and ~/.claude)
 # ---------------------------------------------------------------------------
 
-echo "[$(date -Iseconds)] Running Claude analysis..."
+is_valid_report() { grep -q '^#' "$1" 2>/dev/null; }
 
-bwrap \
-    --ro-bind / / \
-    --proc /proc \
-    --dev /dev \
-    --tmpfs /tmp \
-    --bind "$HOME/.claude" "$HOME/.claude" \
-    --bind "$HOME/.omens" "$HOME/.omens" \
-    --bind "$HOME/.cache/omens" "$HOME/.cache/omens" \
-    -- \
-    env -u CLAUDECODE \
-    "$CLAUDE" \
-        --print \
-        --dangerously-skip-permissions \
-        --allowedTools Bash \
-    < "$PROMPT_FILE" \
-    > "$OUTPUT_FILE"
+if is_valid_report "$OUTPUT_FILE"; then
+    echo "[$(date -Iseconds)] Claude analysis already exists, skipping."
+else
+    rm -f "$OUTPUT_FILE"
+    MAX_RETRIES=3
+    for attempt in $(seq 1 "$MAX_RETRIES"); do
+        echo "[$(date -Iseconds)] Running Claude analysis (attempt $attempt/$MAX_RETRIES)..."
+        rc=0
+        bwrap \
+            --ro-bind / / \
+            --proc /proc \
+            --dev /dev \
+            --tmpfs /tmp \
+            --bind "$HOME/.claude" "$HOME/.claude" \
+            --bind "$HOME/.omens" "$HOME/.omens" \
+            --bind "$HOME/.cache/omens" "$HOME/.cache/omens" \
+            -- \
+            env -u CLAUDECODE \
+            "$CLAUDE" \
+                --print \
+                --dangerously-skip-permissions \
+                --allowedTools Bash \
+            < "$PROMPT_FILE" \
+            > "$OUTPUT_FILE.tmp" 2>&1 || rc=$?
 
-echo "[$(date -Iseconds)] Report saved: $OUTPUT_FILE"
+        if [[ $rc -eq 0 ]] && is_valid_report "$OUTPUT_FILE.tmp"; then
+            mv "$OUTPUT_FILE.tmp" "$OUTPUT_FILE"
+            break
+        fi
+
+        echo "[$(date -Iseconds)] Claude analysis failed (exit $rc), attempt $attempt/$MAX_RETRIES." >&2
+        if [[ -s "$OUTPUT_FILE.tmp" ]]; then
+            head -c 500 "$OUTPUT_FILE.tmp" >&2
+            echo "" >&2
+        fi
+        rm -f "$OUTPUT_FILE.tmp"
+        if [[ $attempt -lt $MAX_RETRIES ]]; then
+            sleep 30
+        fi
+    done
+
+    if ! is_valid_report "$OUTPUT_FILE"; then
+        echo "[$(date -Iseconds)] Claude analysis failed after $MAX_RETRIES attempts." >&2
+        exit 1
+    fi
+
+    echo "[$(date -Iseconds)] Report saved: $OUTPUT_FILE"
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 4 — Email report
 # ---------------------------------------------------------------------------
 
-echo "[$(date -Iseconds)] Emailing report..."
-"$OMENS" send-email "$OUTPUT_FILE"
+SENT_MARKER="$OUTPUT_DIR/$DATE.sent"
+if [[ -f "$SENT_MARKER" ]]; then
+    echo "[$(date -Iseconds)] Email already sent today, skipping."
+else
+    echo "[$(date -Iseconds)] Emailing report..."
+    "$OMENS" send-email "$OUTPUT_FILE"
+    touch "$SENT_MARKER"
+fi
