@@ -160,6 +160,7 @@ EOF
             --dev /dev \
             --tmpfs /tmp \
             --bind "$HOME/.claude" "$HOME/.claude" \
+            --bind "$HOME/.claude.json" "$HOME/.claude.json" \
             --bind "$HOME/.omens" "$HOME/.omens" \
             --bind "$HOME/.cache/omens" "$HOME/.cache/omens" \
             -- \
@@ -178,8 +179,12 @@ EOF
 
         echo "[$(date -Iseconds)] Claude analysis failed (exit $rc), attempt $attempt/$MAX_RETRIES." >&2
         if [[ -s "$OUTPUT_FILE.tmp" ]]; then
+            echo "--- output (first 500 bytes) ---" >&2
             head -c 500 "$OUTPUT_FILE.tmp" >&2
             echo "" >&2
+            echo "--- end output ---" >&2
+        else
+            echo "(no output produced)" >&2
         fi
         rm -f "$OUTPUT_FILE.tmp"
         if [[ $attempt -lt $MAX_RETRIES ]]; then
