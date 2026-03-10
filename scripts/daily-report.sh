@@ -19,7 +19,7 @@ mkdir -p "$OUTPUT_DIR" "$HOME/.cache/omens/docs"
 # ---------------------------------------------------------------------------
 
 RUN_TODAY=$(sqlite3 ~/.omens/db/omens.db \
-    "SELECT COUNT(*) FROM runs WHERE date(started_at, 'unixepoch', 'localtime') = '$DATE' AND status = 'success'")
+    "SELECT COUNT(*) FROM runs WHERE date(started_at, 'unixepoch', 'localtime') = '$DATE' AND status = 'success'" 2>/dev/null || echo 0)
 
 if [[ "$RUN_TODAY" -gt 0 ]]; then
     echo "[$(date -Iseconds)] Collect already succeeded today, skipping."
@@ -46,7 +46,7 @@ fi
 # Phase 2+3 — Build prompt and run Claude analysis (skip if report exists)
 # ---------------------------------------------------------------------------
 
-is_valid_report() { grep -q '^#' "$1" 2>/dev/null; }
+is_valid_report() { [[ -f "$1" ]] && grep -q '^#' "$1" && ! grep -q '^# omens — análise falhou' "$1"; }
 
 if is_valid_report "$OUTPUT_FILE"; then
     echo "[$(date -Iseconds)] Claude analysis already exists, skipping."
@@ -170,23 +170,33 @@ EOF
                 --dangerously-skip-permissions \
                 --allowedTools Bash \
             < "$PROMPT_FILE" \
-            > "$OUTPUT_FILE.tmp" 2>&1 || rc=$?
+            > "$OUTPUT_FILE.tmp" 2>"$OUTPUT_FILE.stderr" || rc=$?
 
         if [[ $rc -eq 0 ]] && is_valid_report "$OUTPUT_FILE.tmp"; then
             mv "$OUTPUT_FILE.tmp" "$OUTPUT_FILE"
+            rm -f "$OUTPUT_FILE.stderr"
             break
         fi
 
         echo "[$(date -Iseconds)] Claude analysis failed (exit $rc), attempt $attempt/$MAX_RETRIES." >&2
+        if [[ -s "$OUTPUT_FILE.stderr" ]]; then
+            echo "--- stderr (first 2000 bytes) ---" >&2
+            head -c 2000 "$OUTPUT_FILE.stderr" >&2
+            echo "" >&2
+            echo "--- end stderr ---" >&2
+        fi
         if [[ -s "$OUTPUT_FILE.tmp" ]]; then
-            echo "--- output (first 500 bytes) ---" >&2
+            echo "--- stdout (first 500 bytes) ---" >&2
             head -c 500 "$OUTPUT_FILE.tmp" >&2
             echo "" >&2
-            echo "--- end output ---" >&2
-        else
-            echo "(no output produced)" >&2
+            echo "--- end stdout ---" >&2
         fi
-        rm -f "$OUTPUT_FILE.tmp"
+        if [[ ! -s "$OUTPUT_FILE.tmp" ]] && [[ ! -s "$OUTPUT_FILE.stderr" ]]; then
+            echo "(no output on stdout or stderr)" >&2
+        fi
+        # Keep last failure for the error email
+        cat "$OUTPUT_FILE.stderr" "$OUTPUT_FILE.tmp" > "$OUTPUT_FILE.lastfail" 2>/dev/null
+        rm -f "$OUTPUT_FILE.tmp" "$OUTPUT_FILE.stderr"
         if [[ $attempt -lt $MAX_RETRIES ]]; then
             sleep 30
         fi
@@ -194,6 +204,19 @@ EOF
 
     if ! is_valid_report "$OUTPUT_FILE"; then
         echo "[$(date -Iseconds)] Claude analysis failed after $MAX_RETRIES attempts." >&2
+        # Send failure notification with last error output
+        {
+            printf '# omens — análise falhou (%s)\n\n' "$DATE"
+            printf 'Claude falhou em todas as %d tentativas.\n\n' "$MAX_RETRIES"
+            if [[ -s "$OUTPUT_FILE.lastfail" ]]; then
+                printf '## Última saída (truncada)\n\n```\n'
+                head -c 2000 "$OUTPUT_FILE.lastfail"
+                printf '\n```\n'
+            else
+                printf 'Nenhuma saída produzida.\n'
+            fi
+        } > "$OUTPUT_FILE"
+        "$OMENS" send-email "$OUTPUT_FILE"
         exit 1
     fi
 

@@ -228,7 +228,7 @@ mod tests {
             Ok(None)
         }
 
-        fn find_row_link_by_text(&self, _search_text: &str) -> Result<Option<String>, String> {
+        fn find_row_link_by_texts(&self, _search_texts: &[&str]) -> Result<Option<String>, String> {
             Ok(None)
         }
 

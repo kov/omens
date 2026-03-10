@@ -844,14 +844,14 @@ fn do_collect(
                 //   • Informe Mensal + N/D Assunto + same Data Referência for
                 //     V.1 & V.2 → 3-cell key (date + Data Entrega)
                 const STABLE_HDRS: &[&str] = &[
-                    "Assunto",
-                    "assunto",
                     "Data Referência",
                     "Data Referencia",
                     "Data Entrega",
                     "MÊS REF.",
                     "MES REF.",
                     "DATA COM",
+                    "Assunto",
+                    "assunto",
                     "Status / Modalidade Envio",
                 ];
                 let is_placeholder =
@@ -1818,32 +1818,58 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
             .map_err(CliError::fatal)?
             .ok_or_else(|| CliError::fatal(format!("item not found: {stable_key}")))?;
 
-        // Build a search string for matching the document row in the table.
-        // Prefer Assunto (if not a placeholder), then Categoria, then Data Referência.
+        // Build search term sets for matching the document row in the table.
+        // Prefer date fields (short, stable, discriminating) over Assunto text.
         let normalized = item.normalized_json.unwrap_or_default();
-        let is_placeholder = |s: &str| {
-            let t = s.trim();
-            t.is_empty() || t == "N/D" || t == "N/A" || t == "-" || t == "--"
+        let pairs: Vec<Vec<String>> = serde_json::from_str(&normalized).unwrap_or_default();
+        let field = |keys: &[&str]| -> Option<String> {
+            for kv in &pairs {
+                if let (Some(k), Some(v)) = (kv.first(), kv.get(1)) {
+                    let kl = k.trim();
+                    if keys.iter().any(|&want| kl == want) {
+                        let t = v.trim();
+                        if !t.is_empty() && t != "N/D" && t != "N/A" && t != "-" && t != "--" {
+                            return Some(t.to_string());
+                        }
+                    }
+                }
+            }
+            None
         };
-        let assunto = fetch_doc_payload_field(&normalized, "Assunto")
-            .or_else(|| fetch_doc_payload_field(&normalized, "assunto"))
-            .filter(|s| !is_placeholder(s))
-            .or_else(|| {
-                // Category often contains the document type (non-placeholder even when Assunto is N/D).
-                fetch_doc_payload_field(&normalized, "Categoria").filter(|s| !is_placeholder(s))
-            })
-            .or_else(|| fetch_doc_payload_field(&normalized, "Data Referência"))
-            .or_else(|| fetch_doc_payload_field(&normalized, "Data Entrega"))
-            .unwrap_or_else(|| {
-                // Last resort: part of the stable_key after the last '|'
-                stable_key
-                    .rsplit('|')
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(40)
-                    .collect()
-            });
+
+        let date_ref = field(&["Data Referência", "Data Referencia", "data referência"]);
+        let categoria = field(&["Categoria", "CATEGORIA  \u{25be}"]);
+        let assunto = field(&["Assunto", "assunto"]);
+
+        // Build candidate search term sets, most specific first.
+        // Each entry is a list of strings that must ALL match in a single row.
+        let mut search_term_sets: Vec<Vec<String>> = Vec::new();
+        if let (Some(cat), Some(date)) = (&categoria, &date_ref) {
+            // e.g. ["Relatório Gerencial", "28/02/2026"] — very precise
+            search_term_sets.push(vec![cat.chars().take(30).collect(), date.clone()]);
+        }
+        if let Some(date) = &date_ref {
+            search_term_sets.push(vec![date.clone()]);
+        }
+        if let Some(subj) = &assunto {
+            search_term_sets.push(vec![subj.chars().take(40).collect()]);
+        }
+        if let Some(cat) = &categoria {
+            search_term_sets.push(vec![cat.chars().take(40).collect()]);
+        }
+        // Last resort: part of the stable_key after the last '|'
+        if search_term_sets.is_empty() {
+            let fallback: String = stable_key
+                .rsplit('|')
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(40)
+                .collect();
+            if !fallback.is_empty() {
+                search_term_sets.push(vec![fallback]);
+            }
+        }
 
         // Extract section from stable_key to know which tab to click.
         let section = stable_key
@@ -1861,23 +1887,31 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
             std::thread::sleep(Duration::from_millis(500));
         }
 
-        // Find the document link by searching for the assunto text in table rows.
-        let search = assunto.chars().take(40).collect::<String>();
-        match harness
-            .find_row_link_by_text(&search)
-            .map_err(CliError::fatal)?
-        {
-            Some(href) => {
-                // URLs extracted from onclick handlers may span multiple lines;
-                // keep only the first line and trim whitespace.
+        // Try each search term set until we find a matching row.
+        let mut found_href: Option<String> = None;
+        for terms in &search_term_sets {
+            let refs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+            let result = harness
+                .find_row_link_by_texts(&refs)
+                .map_err(CliError::fatal)?;
+            if let Some(href) = result {
                 let href = href.lines().next().unwrap_or(&href).trim().to_string();
-                eprintln!("fetch-doc: found document link: {href}");
-                href
+                eprintln!(
+                    "fetch-doc: found document link via [{}]: {href}",
+                    refs.join(", ")
+                );
+                found_href = Some(href);
+                break;
             }
+        }
+        match found_href {
+            Some(href) => href,
             None => {
                 harness.shutdown().ok();
+                let tried: Vec<String> = search_term_sets.iter().map(|t| t.join("+")).collect();
                 return Err(CliError::fatal(format!(
-                    "no document link found in table for search text: {search}"
+                    "no document link found in table (tried: {})",
+                    tried.join(", ")
                 )));
             }
         }
@@ -2010,14 +2044,6 @@ fn fetch_doc_pdf_via_browser(
 }
 
 /// Extract a field value from a `[["key","val"],...]` normalized_json string.
-fn fetch_doc_payload_field(normalized_json: &str, key: &str) -> Option<String> {
-    let pairs: Vec<Vec<String>> = serde_json::from_str(normalized_json).ok()?;
-    pairs
-        .into_iter()
-        .find(|kv| kv.first().map(|k| k.as_str()) == Some(key))
-        .and_then(|kv| kv.into_iter().nth(1))
-}
-
 /// Strip HTML tags and normalize whitespace.  Not a full HTML parser but
 /// sufficient for extracting the readable text from structured pages.
 fn html_to_text(html: &str) -> String {

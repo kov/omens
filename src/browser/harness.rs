@@ -68,9 +68,9 @@ pub trait BrowserHarness {
     fn shutdown(&mut self) -> Result<(), String>;
     /// Find the href of the first element matching `selector`.
     fn find_link_href(&self, selector: &str) -> Result<Option<String>, String>;
-    /// Find the href of the first link in a table row whose text contains `search_text`.
+    /// Find the href of the first link in a table row matching ALL search terms.
     /// Also looks for onclick-embedded URLs (window.open patterns).
-    fn find_row_link_by_text(&self, search_text: &str) -> Result<Option<String>, String>;
+    fn find_row_link_by_texts(&self, search_texts: &[&str]) -> Result<Option<String>, String>;
     /// Focus an element and type text into it.
     fn type_text(&self, selector: &str, text: &str) -> Result<(), String>;
     /// Scroll the page up or down by the given number of pixels.
@@ -934,15 +934,20 @@ impl BrowserHarness for ChromiumoxideHarness {
         })
     }
 
-    fn find_row_link_by_text(&self, search_text: &str) -> Result<Option<String>, String> {
+    fn find_row_link_by_texts(&self, search_texts: &[&str]) -> Result<Option<String>, String> {
         let page = self.page()?.clone();
-        let text_json = serde_json::to_string(search_text).unwrap_or_else(|_| "\"\"".to_string());
+        let texts_json = serde_json::to_string(search_texts).unwrap_or_else(|_| "[]".to_string());
         let js = format!(
             r#"(function() {{
-                var searchText = {text_json};
+                var terms = {texts_json};
                 var rows = document.querySelectorAll('table tbody tr');
                 for (var i = 0; i < rows.length; i++) {{
-                    if (!(rows[i].textContent || '').includes(searchText)) continue;
+                    var text = rows[i].textContent || '';
+                    var allMatch = true;
+                    for (var t = 0; t < terms.length; t++) {{
+                        if (!text.includes(terms[t])) {{ allMatch = false; break; }}
+                    }}
+                    if (!allMatch) continue;
                     var links = rows[i].querySelectorAll('a');
                     for (var j = 0; j < links.length; j++) {{
                         var a = links[j];
@@ -962,7 +967,7 @@ impl BrowserHarness for ChromiumoxideHarness {
             .block_on(async {
                 page.evaluate(js)
                     .await
-                    .map_err(|e| format!("find_row_link_by_text: {e}"))
+                    .map_err(|e| format!("find_row_link_by_texts: {e}"))
             })?
             .into_value()
             .unwrap_or(None);
