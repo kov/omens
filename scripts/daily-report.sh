@@ -12,6 +12,9 @@ PROMPT_FILE="$HOME/.cache/omens/prompt.txt"
 
 EX_AUTH_REQUIRED=20
 
+# Refresh token outside sandbox (quick throwaway call)
+"$CLAUDE" --print "Good morning, Claude!"
+
 mkdir -p "$OUTPUT_DIR" "$HOME/.cache/omens/docs"
 
 # ---------------------------------------------------------------------------
