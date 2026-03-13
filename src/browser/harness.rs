@@ -116,6 +116,11 @@ pub struct RepeatingGroup {
     pub sample_fields: Vec<String>,
 }
 
+/// Default timeout for CDP evaluate calls (seconds).
+/// Generous enough for heavy pages but prevents indefinite hangs when the
+/// browser renderer is busy (e.g. ad scripts hogging the JS event loop).
+const CDP_EVALUATE_TIMEOUT_SECS: u64 = 60;
+
 pub struct ChromiumoxideHarness {
     browser_binary: PathBuf,
     profile_dir: PathBuf,
@@ -158,6 +163,53 @@ impl ChromiumoxideHarness {
             .ok_or_else(|| "browser page is not initialized".to_string())
     }
 
+    /// Evaluate JS with a hard timeout, independent of chromiumoxide's internal
+    /// eviction timer (which can be unreliable under load).  Returns the
+    /// `EvaluationResult` on success, or a descriptive error on timeout /
+    /// evaluation failure.  Logs slow calls (>=5s) and all failures to stderr.
+    fn timed_evaluate(
+        &self,
+        js: String,
+        label: &str,
+        timeout_secs: u64,
+    ) -> Result<chromiumoxide::js::EvaluationResult, String> {
+        let page = self.page()?.clone();
+        let label = label.to_string();
+        self.runtime.block_on(async move {
+            let t0 = tokio::time::Instant::now();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                page.evaluate(js),
+            )
+            .await;
+            let elapsed = t0.elapsed();
+            match result {
+                Ok(Ok(val)) => {
+                    if elapsed.as_secs() >= 5 {
+                        eprintln!(
+                            "    [cdp] {label}: OK in {:.1}s",
+                            elapsed.as_secs_f64()
+                        );
+                    }
+                    Ok(val)
+                }
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "    [cdp] {label}: failed after {:.1}s: {e}",
+                        elapsed.as_secs_f64()
+                    );
+                    Err(format!("{label}: {e}"))
+                }
+                Err(_) => {
+                    eprintln!(
+                        "    [cdp] {label}: timed out after {timeout_secs}s"
+                    );
+                    Err(format!("{label}: timed out after {timeout_secs}s"))
+                }
+            }
+        })
+    }
+
     fn browser(&self) -> Result<&Browser, String> {
         self.browser
             .as_ref()
@@ -177,7 +229,6 @@ impl ChromiumoxideHarness {
     /// Fetch a URL via the browser's JS context (inherits cookies/CF clearance).
     /// Returns the raw response bytes.
     pub fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, String> {
-        let page = self.page()?.clone();
         let url_json = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
         let js = format!(
             r#"(async () => {{
@@ -192,34 +243,31 @@ impl ChromiumoxideHarness {
                 return btoa(chunks.join(''));
             }})()"#
         );
-        self.runtime.block_on(async {
-            let result = page
-                .evaluate(js)
-                .await
-                .map_err(|e| format!("browser fetch of {url} failed: {e}"))?;
-            let value: serde_json::Value = result.into_value().unwrap_or(serde_json::Value::Null);
-            let b64 = match value {
-                serde_json::Value::String(s) => s,
-                other => return Err(format!("unexpected fetch result: {other}")),
-            };
-            use base64::Engine as _;
-            let mut bytes = base64::engine::general_purpose::STANDARD
-                .decode(&b64)
-                .map_err(|e| format!("base64 decode: {e}"))?;
+        let label = format!("browser fetch of {url}");
+        // Longer timeout for network fetches (downloads can be large)
+        let result = self.timed_evaluate(js, &label, 120)?;
+        let value: serde_json::Value = result.into_value().unwrap_or(serde_json::Value::Null);
+        let b64 = match value {
+            serde_json::Value::String(s) => s,
+            other => return Err(format!("unexpected fetch result: {other}")),
+        };
+        use base64::Engine as _;
+        let mut bytes = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .map_err(|e| format!("base64 decode: {e}"))?;
 
-            // Some servers (e.g. FNET) return a JSON-encoded base64 string rather
-            // than raw bytes. Detect this (decoded bytes start with '"') and unwrap.
-            if bytes.starts_with(b"\"") {
-                let s = String::from_utf8_lossy(&bytes);
-                let inner: String = serde_json::from_str(s.as_ref())
-                    .map_err(|e| format!("JSON-wrapped response: {e}"))?;
-                bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&inner)
-                    .map_err(|e| format!("inner base64 decode: {e}"))?;
-            }
+        // Some servers (e.g. FNET) return a JSON-encoded base64 string rather
+        // than raw bytes. Detect this (decoded bytes start with '"') and unwrap.
+        if bytes.starts_with(b"\"") {
+            let s = String::from_utf8_lossy(&bytes);
+            let inner: String = serde_json::from_str(s.as_ref())
+                .map_err(|e| format!("JSON-wrapped response: {e}"))?;
+            bytes = base64::engine::general_purpose::STANDARD
+                .decode(&inner)
+                .map_err(|e| format!("inner base64 decode: {e}"))?;
+        }
 
-            Ok(bytes)
-        })
+        Ok(bytes)
     }
 
     /// Make session cookies persistent so they survive browser restarts.
@@ -439,6 +487,7 @@ impl BrowserHarness for ChromiumoxideHarness {
             r#"document.querySelector('{}').click()"#,
             selector.replace('\'', "\\'")
         );
+        let click_label = format!("click on '{selector}'");
         self.runtime.block_on(async move {
             let in_flight = Arc::new(AtomicUsize::new(0));
 
@@ -474,9 +523,41 @@ impl BrowserHarness for ChromiumoxideHarness {
                 }
             });
 
-            page.evaluate(js)
-                .await
-                .map_err(|err| format!("click on '{selector}' failed: {err}"))?;
+            let t0 = tokio::time::Instant::now();
+            let click_result = tokio::time::timeout(
+                std::time::Duration::from_secs(CDP_EVALUATE_TIMEOUT_SECS),
+                page.evaluate(js),
+            )
+            .await;
+            let click_elapsed = t0.elapsed();
+
+            match click_result {
+                Ok(Ok(_)) => {
+                    if click_elapsed.as_secs() >= 5 {
+                        eprintln!(
+                            "    [cdp] {click_label}: OK in {:.1}s",
+                            click_elapsed.as_secs_f64()
+                        );
+                    }
+                }
+                Ok(Err(err)) => {
+                    drain_handle.abort();
+                    eprintln!(
+                        "    [cdp] {click_label}: failed after {:.1}s",
+                        click_elapsed.as_secs_f64()
+                    );
+                    return Err(format!("{click_label} failed: {err}"));
+                }
+                Err(_) => {
+                    drain_handle.abort();
+                    eprintln!(
+                        "    [cdp] {click_label}: timed out after {CDP_EVALUATE_TIMEOUT_SECS}s"
+                    );
+                    return Err(format!(
+                        "{click_label} failed: timed out after {CDP_EVALUATE_TIMEOUT_SECS}s"
+                    ));
+                }
+            }
 
             // Wait for network idle: no in-flight requests for 500ms, up to settle_ms max
             let idle_threshold = std::time::Duration::from_millis(500);
@@ -512,8 +593,6 @@ impl BrowserHarness for ChromiumoxideHarness {
     fn dismiss_overlays(&self) {
         // Best-effort: hide #modal_masterpage (ad popup + mask) and any other
         // visible blocking overlays. Silently ignores missing elements.
-        let Ok(page) = self.page() else { return };
-        let page = page.clone();
         let js = r#"
             (function() {
                 var modal = document.getElementById('modal_masterpage');
@@ -522,14 +601,12 @@ impl BrowserHarness for ChromiumoxideHarness {
                 if (mask) mask.style.display = 'none';
                 return true;
             })()
-        "#;
-        let _ = self
-            .runtime
-            .block_on(async move { page.evaluate(js).await });
+        "#
+        .to_string();
+        let _ = self.timed_evaluate(js, "dismiss overlays", 10);
     }
 
     fn discover_tab_anchors(&self) -> Result<Vec<TabAnchor>, String> {
-        let page = self.page()?.clone();
         let js = r##"
             (function() {
                 var results = [];
@@ -549,12 +626,7 @@ impl BrowserHarness for ChromiumoxideHarness {
         "##;
 
         let js_tabs: Vec<JsTabAnchor> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(js)
-                    .await
-                    .map_err(|err| format!("tab discovery failed: {err}"))
-            })?
+            .timed_evaluate(js.to_string(), "tab discovery", CDP_EVALUATE_TIMEOUT_SECS)?
             .into_value()
             .unwrap_or_default();
 
@@ -568,8 +640,6 @@ impl BrowserHarness for ChromiumoxideHarness {
     }
 
     fn capture_tab_summary(&self) -> Result<TabSummary, String> {
-        let page = self.page()?.clone();
-
         let tables_js = r#"
             (function() {
                 var results = [];
@@ -614,12 +684,7 @@ impl BrowserHarness for ChromiumoxideHarness {
         "#;
 
         let tables: Vec<JsTableInfo> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(tables_js)
-                    .await
-                    .map_err(|err| format!("table scan failed: {err}"))
-            })?
+            .timed_evaluate(tables_js.to_string(), "table scan", CDP_EVALUATE_TIMEOUT_SECS)?
             .into_value()
             .unwrap_or_default();
 
@@ -653,12 +718,7 @@ impl BrowserHarness for ChromiumoxideHarness {
         "#;
 
         let link_patterns: Vec<JsLinkPattern> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(links_js)
-                    .await
-                    .map_err(|err| format!("link pattern scan failed: {err}"))
-            })?
+            .timed_evaluate(links_js.to_string(), "link pattern scan", CDP_EVALUATE_TIMEOUT_SECS)?
             .into_value()
             .unwrap_or_default();
 
@@ -720,24 +780,21 @@ impl BrowserHarness for ChromiumoxideHarness {
         "##;
 
         let repeating_groups: Vec<JsRepeatingGroup> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(repeating_js)
-                    .await
-                    .map_err(|err| format!("repeating group scan failed: {err}"))
-            })?
+            .timed_evaluate(
+                repeating_js.to_string(),
+                "repeating group scan",
+                CDP_EVALUATE_TIMEOUT_SECS,
+            )?
             .into_value()
             .unwrap_or_default();
 
         let text_blocks: usize = self
-            .runtime
-            .block_on(async {
-                page.evaluate(
-                    "document.querySelectorAll('p, article, .content, .description, .text').length",
-                )
-                .await
-                .map_err(|err| format!("text block count failed: {err}"))
-            })?
+            .timed_evaluate(
+                "document.querySelectorAll('p, article, .content, .description, .text').length"
+                    .to_string(),
+                "text block count",
+                CDP_EVALUATE_TIMEOUT_SECS,
+            )?
             .into_value()
             .unwrap_or(0);
 
@@ -777,7 +834,6 @@ impl BrowserHarness for ChromiumoxideHarness {
         selector_hint: &str,
         max_rows: usize,
     ) -> Result<Vec<Vec<String>>, String> {
-        let page = self.page()?.clone();
         let sel = selector_hint.replace('\'', "\\'");
         let js = format!(
             r#"(function() {{
@@ -799,12 +855,7 @@ impl BrowserHarness for ChromiumoxideHarness {
             }})()"#
         );
         let rows: Vec<Vec<String>> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(js)
-                    .await
-                    .map_err(|err| format!("table row extraction failed: {err}"))
-            })?
+            .timed_evaluate(js, "table row extraction", CDP_EVALUATE_TIMEOUT_SECS)?
             .into_value()
             .unwrap_or_default();
         Ok(rows)
@@ -817,7 +868,6 @@ impl BrowserHarness for ChromiumoxideHarness {
         field_ids: &[&str],
         max_rows: usize,
     ) -> Result<Vec<HashMap<String, String>>, String> {
-        let page = self.page()?.clone();
         let field_ids_json = serde_json::to_string(field_ids).unwrap_or_else(|_| "[]".to_string());
         let container = container_hint.replace('\'', "\\'");
         let child = child_selector.replace('\'', "\\'");
@@ -848,19 +898,13 @@ impl BrowserHarness for ChromiumoxideHarness {
             }})()"#
         );
         let rows: Vec<HashMap<String, String>> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(js)
-                    .await
-                    .map_err(|err| format!("repeating group extraction failed: {err}"))
-            })?
+            .timed_evaluate(js, "repeating group extraction", CDP_EVALUATE_TIMEOUT_SECS)?
             .into_value()
             .unwrap_or_default();
         Ok(rows)
     }
 
     fn find_link_href(&self, selector: &str) -> Result<Option<String>, String> {
-        let page = self.page()?.clone();
         let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
         let js = format!(
             "(function() {{ \
@@ -870,19 +914,13 @@ impl BrowserHarness for ChromiumoxideHarness {
             }})()"
         );
         let result: Option<String> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(js)
-                    .await
-                    .map_err(|e| format!("find_link_href: {e}"))
-            })?
+            .timed_evaluate(js, "find_link_href", CDP_EVALUATE_TIMEOUT_SECS)?
             .into_value()
             .unwrap_or(None);
         Ok(result)
     }
 
     fn type_text(&self, selector: &str, text: &str) -> Result<(), String> {
-        let page = self.page()?.clone();
         let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
         let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
         let js = format!(
@@ -896,46 +934,32 @@ impl BrowserHarness for ChromiumoxideHarness {
                 return true;
             }})()"#
         );
-        self.runtime
-            .block_on(async {
-                page.evaluate(js)
-                    .await
-                    .map_err(|e| format!("type_text failed: {e}"))
-            })
-            .map(|_| ())
+        self.timed_evaluate(js, "type_text", CDP_EVALUATE_TIMEOUT_SECS)?;
+        Ok(())
     }
 
     fn scroll(&self, direction: ScrollDirection, pixels: u32) -> Result<(), String> {
-        let page = self.page()?.clone();
         let dy = direction.dy(pixels);
         let js = format!("window.scrollBy(0, {dy})");
-        self.runtime
-            .block_on(async {
-                page.evaluate(js)
-                    .await
-                    .map_err(|e| format!("scroll failed: {e}"))
-            })
-            .map(|_| ())
+        self.timed_evaluate(js, "scroll", 10)?;
+        Ok(())
     }
 
     fn evaluate_js(&self, expression: &str) -> Result<String, String> {
-        let page = self.page()?.clone();
         let expr = expression.to_string();
-        self.runtime.block_on(async {
-            let result = page
-                .evaluate(format!("JSON.stringify({expr})"))
-                .await
-                .map_err(|e| format!("evaluate_js failed: {e}"))?;
-            let value: serde_json::Value = result.into_value().unwrap_or(serde_json::Value::Null);
-            match value {
-                serde_json::Value::String(s) => Ok(s),
-                other => Ok(other.to_string()),
-            }
-        })
+        let result = self.timed_evaluate(
+            format!("JSON.stringify({expr})"),
+            "evaluate_js",
+            CDP_EVALUATE_TIMEOUT_SECS,
+        )?;
+        let value: serde_json::Value = result.into_value().unwrap_or(serde_json::Value::Null);
+        match value {
+            serde_json::Value::String(s) => Ok(s),
+            other => Ok(other.to_string()),
+        }
     }
 
     fn find_row_link_by_texts(&self, search_texts: &[&str]) -> Result<Option<String>, String> {
-        let page = self.page()?.clone();
         let texts_json = serde_json::to_string(search_texts).unwrap_or_else(|_| "[]".to_string());
         let js = format!(
             r#"(function() {{
@@ -963,12 +987,7 @@ impl BrowserHarness for ChromiumoxideHarness {
             }})()"#
         );
         let result: Option<String> = self
-            .runtime
-            .block_on(async {
-                page.evaluate(js)
-                    .await
-                    .map_err(|e| format!("find_row_link_by_texts: {e}"))
-            })?
+            .timed_evaluate(js, "find_row_link_by_texts", CDP_EVALUATE_TIMEOUT_SECS)?
             .into_value()
             .unwrap_or(None);
         Ok(result)

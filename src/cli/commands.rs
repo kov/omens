@@ -774,6 +774,7 @@ fn do_collect(
     }
 
     for ticker in tickers {
+        let ticker_t0 = std::time::Instant::now();
         let fund_url = format!("{base_url}/fiis/{ticker}");
         println!("collect: navigating to {fund_url}");
 
@@ -789,7 +790,20 @@ fn do_collect(
 
         check_page_auth(&harness).map_err(|e| e.message)?;
 
+        // Per-ticker timeout: if a single ticker takes too long (e.g. browser
+        // becomes unresponsive on a heavy page), skip remaining sections and
+        // move on to the next ticker to avoid stalling the entire run.
+        const TICKER_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
         for recipe in &active_recipes {
+            let ticker_elapsed = ticker_t0.elapsed().as_secs();
+            if ticker_elapsed > TICKER_TIMEOUT_SECS {
+                eprintln!(
+                    "  [{ticker}] skipping remaining sections: ticker took {ticker_elapsed}s (>{TICKER_TIMEOUT_SECS}s limit)"
+                );
+                break;
+            }
+
             let section = &recipe.section;
             println!("  [{ticker}/{section}] extracting...");
 
@@ -1063,6 +1077,11 @@ fn do_collect(
             } else {
                 println!("    skip: no extractable table or repeating group in recipe");
             }
+        }
+
+        let ticker_secs = ticker_t0.elapsed().as_secs_f64();
+        if ticker_secs >= 10.0 {
+            eprintln!("  [{ticker}] completed in {ticker_secs:.1}s");
         }
     }
 
