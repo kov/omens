@@ -471,13 +471,47 @@ impl BrowserHarness for ChromiumoxideHarness {
         let page = self.page()?.clone();
         let url = url.to_string();
         self.runtime.block_on(async move {
-            page.goto(&url)
-                .await
-                .map_err(|err| format!("navigation to {url} failed: {err}"))?;
-            page.wait_for_navigation()
-                .await
-                .map_err(|err| format!("wait for navigation failed: {err}"))?;
-            Ok(())
+            let t0 = tokio::time::Instant::now();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(CDP_EVALUATE_TIMEOUT_SECS),
+                async {
+                    page.goto(&url)
+                        .await
+                        .map_err(|err| format!("navigation to {url} failed: {err}"))?;
+                    page.wait_for_navigation()
+                        .await
+                        .map_err(|err| format!("wait for navigation failed: {err}"))?;
+                    Ok::<(), String>(())
+                },
+            )
+            .await;
+            let elapsed = t0.elapsed();
+            match result {
+                Ok(Ok(())) => {
+                    if elapsed.as_secs() >= 5 {
+                        eprintln!(
+                            "    [cdp] navigate to {url}: OK in {:.1}s",
+                            elapsed.as_secs_f64()
+                        );
+                    }
+                    Ok(())
+                }
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "    [cdp] navigate to {url}: failed after {:.1}s",
+                        elapsed.as_secs_f64()
+                    );
+                    Err(e)
+                }
+                Err(_) => {
+                    eprintln!(
+                        "    [cdp] navigate to {url}: timed out after {CDP_EVALUATE_TIMEOUT_SECS}s"
+                    );
+                    Err(format!(
+                        "navigation to {url} timed out after {CDP_EVALUATE_TIMEOUT_SECS}s"
+                    ))
+                }
+            }
         })
     }
 

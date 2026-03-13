@@ -782,8 +782,9 @@ fn do_collect(
             harness.launch(&fund_url).map_err(|e| e.to_string())?;
             let _ = harness.enable_stealth();
             first = false;
-        } else {
-            harness.navigate(&fund_url).map_err(|e| e.to_string())?;
+        } else if let Err(e) = harness.navigate(&fund_url) {
+            eprintln!("  [{ticker}] skip: navigation failed: {e}");
+            continue;
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
         harness.dismiss_overlays();
