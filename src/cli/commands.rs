@@ -13,8 +13,6 @@ use std::time::{Duration, SystemTime};
 
 use super::CliError;
 
-const FNET_LANDING_URL: &str = "https://fnet.bmfbovespa.com.br/fnet/publico/pesquisarGerenciadorDocumentosCVM?paginaCertificados=false&tipoFundo=1";
-
 fn is_fnet_url(url: &str) -> bool {
     url.contains("fnet.bmfbovespa.com.br")
         || url.contains("bvmf.bmfbovespa.com.br")
@@ -789,7 +787,20 @@ fn do_collect(
         std::thread::sleep(std::time::Duration::from_secs(3));
         harness.dismiss_overlays();
 
-        check_page_auth(&harness).map_err(|e| e.message)?;
+        check_page_auth_with_credentials(
+            &harness,
+            loaded.clubefii.username.as_deref(),
+            loaded.clubefii.password.as_deref(),
+        )
+        .map_err(|e| e.message)?;
+
+        // Auto-login redirects to the homepage; re-navigate to the ticker page.
+        let current = harness.current_url().unwrap_or_default();
+        if !current.contains(&format!("/fiis/{ticker}")) {
+            harness.navigate(&fund_url).map_err(|e| e.to_string())?;
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            harness.dismiss_overlays();
+        }
 
         // Per-ticker timeout: if a single ticker takes too long (e.g. browser
         // becomes unresponsive on a heavy page), skip remaining sections and
@@ -1086,8 +1097,18 @@ fn do_collect(
         }
     }
 
+    refresh_session_cookies(&harness);
     harness.shutdown().ok();
     Ok(stats)
+}
+
+/// Re-persist session cookies so rotated tokens survive browser restarts.
+fn refresh_session_cookies(harness: &ChromiumoxideHarness) {
+    match harness.persist_session_cookies("clubefii") {
+        Ok(n) if n > 0 => eprintln!("  refreshed {n} session cookie(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("  warning: failed to refresh session cookies: {e}"),
+    }
 }
 
 /// Parse Brazilian date "DD/MM/YYYY" (or "DD/MM/YYYY HH:MM:SS") → Unix epoch seconds (UTC midnight).
@@ -1494,9 +1515,36 @@ fn display_launch_env(
 }
 
 /// Check whether the current clubefii page indicates the user is not logged in
-/// or is stuck on a bot-verification challenge page.
-/// Returns `Err(CliError::auth_required)` if the session appears invalid.
-fn check_page_auth(harness: &ChromiumoxideHarness) -> Result<(), CliError> {
+/// or is stuck on a bot-verification challenge page.  When username/password
+/// are provided, attempts automatic Keycloak login before giving up.
+fn check_page_auth_with_credentials(
+    harness: &ChromiumoxideHarness,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<(), CliError> {
+    let status = detect_auth_status(harness)?;
+    match status.as_str() {
+        "login" => {
+            if let (Some(user), Some(pass)) = (username, password) {
+                eprintln!("  session expired, attempting automatic login...");
+                auto_login(harness, user, pass)?;
+                return Ok(());
+            }
+            Err(CliError::auth_required(
+                "session expired; re-authenticate with `omens auth bootstrap`",
+            ))
+        }
+        "challenge" => Err(CliError::auth_required(
+            "blocked by bot verification; re-authenticate with `omens auth bootstrap`",
+        )),
+        "no-nav" => Err(CliError::auth_required(
+            "page did not load (no navigation bar); re-authenticate with `omens auth bootstrap`",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn detect_auth_status(harness: &ChromiumoxideHarness) -> Result<String, CliError> {
     let js = r#"(function() {
         var tools = document.querySelector('#tools');
         if (tools && tools.textContent.includes('ENTRAR')) return 'login';
@@ -1506,19 +1554,101 @@ fn check_page_auth(harness: &ChromiumoxideHarness) -> Result<(), CliError> {
         return 'ok';
     })()"#;
     let result = harness.evaluate_js(js).map_err(CliError::fatal)?;
-    let status = result.trim().trim_matches('"');
-    match status {
-        "login" => Err(CliError::auth_required(
-            "session expired; re-authenticate with `omens auth bootstrap`",
-        )),
-        "challenge" => Err(CliError::auth_required(
-            "blocked by bot verification; re-authenticate with `omens auth bootstrap`",
-        )),
-        "no-nav" => Err(CliError::auth_required(
-            "page did not load (no navigation bar); re-authenticate with `omens auth bootstrap`",
-        )),
-        _ => Ok(()),
+    Ok(result.trim().trim_matches('"').to_string())
+}
+
+/// Automate Keycloak login: trigger loginKC, fill credentials, submit, wait
+/// for redirect back to clubefii, then validate and persist cookies.
+fn auto_login(
+    harness: &ChromiumoxideHarness,
+    username: &str,
+    password: &str,
+) -> Result<(), CliError> {
+    // Navigate directly to the Keycloak login endpoint.
+    harness
+        .navigate("https://www.clubefii.com.br/LoginKC.aspx?pag=/")
+        .map_err(CliError::fatal)?;
+    std::thread::sleep(Duration::from_secs(5));
+
+    // Verify we landed on the Keycloak login page.
+    let url = harness.current_url().map_err(CliError::fatal)?;
+    if !url.contains("login.clubefii.com.br") {
+        return Err(CliError::auth_required(format!(
+            "auto-login: did not reach Keycloak login page (at {url})"
+        )));
     }
+
+    // Fill username.
+    let user_js = format!(
+        r#"(function() {{
+            var el = document.getElementById('username');
+            if (!el) return 'no-field';
+            el.value = {};
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            return 'ok';
+        }})()"#,
+        serde_json::to_string(username).unwrap_or_else(|_| "\"\"".to_string())
+    );
+    let r = harness.evaluate_js(&user_js).map_err(CliError::fatal)?;
+    if r.contains("no-field") {
+        return Err(CliError::auth_required(
+            "auto-login: username field not found on login page",
+        ));
+    }
+
+    // Fill password.
+    let pass_js = format!(
+        r#"(function() {{
+            var el = document.getElementById('password');
+            if (!el) return 'no-field';
+            el.value = {};
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            return 'ok';
+        }})()"#,
+        serde_json::to_string(password).unwrap_or_else(|_| "\"\"".to_string())
+    );
+    let r = harness.evaluate_js(&pass_js).map_err(CliError::fatal)?;
+    if r.contains("no-field") {
+        return Err(CliError::auth_required(
+            "auto-login: password field not found on login page",
+        ));
+    }
+
+    // Check "remember me" and submit.
+    harness
+        .evaluate_js(
+            r#"(function() {
+                var cb = document.getElementById('rememberMe');
+                if (cb && !cb.checked) cb.click();
+                var btn = document.getElementById('kc-login');
+                if (btn) btn.click();
+                return 'ok';
+            })()"#,
+        )
+        .map_err(CliError::fatal)?;
+
+    // Wait for redirect back to clubefii.
+    for _ in 0..15 {
+        std::thread::sleep(Duration::from_secs(2));
+        let url = harness.current_url().map_err(CliError::fatal)?;
+        if url.contains("clubefii.com.br") && !url.contains("login.clubefii.com.br") {
+            // Back on clubefii — verify we're actually logged in.
+            std::thread::sleep(Duration::from_secs(2));
+            let status = detect_auth_status(harness)?;
+            if status == "ok" {
+                eprintln!("  auto-login succeeded");
+                refresh_session_cookies(harness);
+                return Ok(());
+            }
+            return Err(CliError::auth_required(format!(
+                "auto-login: redirected but auth status is '{status}'"
+            )));
+        }
+    }
+
+    Err(CliError::auth_required(
+        "auto-login: timed out waiting for redirect back to clubefii",
+    ))
 }
 
 fn require_session(
@@ -1792,9 +1922,8 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
             .ok_or_else(|| CliError::fatal("item has no source URL stored in DB"))?
     };
 
-    // For FNET URLs, avoid navigating Chrome directly to PDF-serving pages
-    // (Chrome dumps PDF content to stdout). Instead, land on a neutral HTML page
-    // on the same domain to pass Cloudflare, then use JS fetch for the document.
+    // For FNET URLs, navigate directly to the target URL so the browser passes
+    // any Cloudflare challenge and JS fetch stays same-origin.
     let is_fnet_direct = is_url && is_fnet_url(&initial_url);
     let launch_url = if is_fnet_direct {
         "about:blank".to_string()
@@ -1812,16 +1941,20 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
     harness.launch(&launch_url).map_err(CliError::fatal)?;
     let _ = harness.enable_stealth();
     if is_fnet_direct {
-        harness
-            .navigate(FNET_LANDING_URL)
-            .map_err(CliError::fatal)?;
+        // Navigate directly to the target URL. Chrome will render PDFs in its
+        // built-in viewer, and subsequent JS fetch() will be same-origin.
+        harness.navigate(&initial_url).map_err(CliError::fatal)?;
     }
     std::thread::sleep(Duration::from_secs(5));
     harness.dismiss_overlays();
 
     // Detect expired/missing login before attempting any tab navigation.
     if !is_url {
-        check_page_auth(&harness)?;
+        check_page_auth_with_credentials(
+            &harness,
+            loaded.clubefii.username.as_deref(),
+            loaded.clubefii.password.as_deref(),
+        )?;
     }
 
     // For stable_key: navigate list page, click the tab, and find the document link.
@@ -1950,13 +2083,11 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
     }
 
     // Navigate to the document URL if we haven't already.
-    // For FNET URLs, navigate to the landing page (not the PDF URL) to avoid
-    // Chrome dumping PDF content to stdout, then use JS fetch for the document.
+    // Navigate directly so Chrome passes any Cloudflare challenge and JS fetch
+    // stays same-origin. Chrome renders PDFs in its built-in viewer.
     let doc_is_fnet = is_fnet_url(&doc_url);
     if doc_is_fnet && !is_fnet_direct {
-        harness
-            .navigate(FNET_LANDING_URL)
-            .map_err(CliError::fatal)?;
+        harness.navigate(&doc_url).map_err(CliError::fatal)?;
         std::thread::sleep(Duration::from_secs(5));
     } else if !doc_is_fnet && (!is_url || doc_url != url_or_key) {
         harness.navigate(&doc_url).map_err(CliError::fatal)?;
@@ -1965,6 +2096,7 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
 
     let text = fetch_doc_extract_text(&harness, &doc_url)?;
 
+    refresh_session_cookies(&harness);
     harness.shutdown().ok();
 
     if !text.trim().is_empty() {
@@ -1987,14 +2119,9 @@ fn fetch_doc_extract_text(harness: &ChromiumoxideHarness, url: &str) -> Result<S
             )
             .map_err(CliError::fatal)?;
         if let Some(href) = link {
-            // For FNET links, navigate to the landing page (not the PDF URL) to
-            // avoid Chrome dumping PDF content to stdout.
-            let nav_target = if is_fnet_url(&href) {
-                FNET_LANDING_URL
-            } else {
-                &href
-            };
-            harness.navigate(nav_target).map_err(CliError::fatal)?;
+            // Navigate directly to the document URL. Chrome renders PDFs in its
+            // built-in viewer, and JS fetch() stays same-origin.
+            harness.navigate(&href).map_err(CliError::fatal)?;
             std::thread::sleep(Duration::from_secs(5));
             return fetch_doc_extract_text(harness, &href);
         }
@@ -2007,7 +2134,8 @@ fn fetch_doc_extract_text(harness: &ChromiumoxideHarness, url: &str) -> Result<S
         // first; it handles both PDF and HTML responses.
         match fetch_doc_pdf_via_browser(harness, url) {
             Ok(text) if !text.trim().is_empty() => return Ok(text),
-            _ => {}
+            Ok(_) => eprintln!("fetch-doc: JS fetch returned empty content for {url}"),
+            Err(e) => eprintln!("fetch-doc: JS fetch failed for {url}: {e}"),
         }
         // Maybe the page has a separate PDF download link.
         let pdf_link = harness

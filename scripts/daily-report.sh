@@ -9,6 +9,7 @@ DATE=$(date +%Y-%m-%d)
 OUTPUT_DIR="$HOME/Documents/omens"
 OUTPUT_FILE="$OUTPUT_DIR/$DATE.md"
 PROMPT_FILE="$HOME/.cache/omens/prompt.txt"
+export RUST_BACKTRACE=1
 
 EX_AUTH_REQUIRED=20
 
@@ -149,6 +150,13 @@ unless you have already done so and the answer is not there.
 payload_json format: [["key","value"], ...]  (sorted key-value pairs)
 
 Do not write files or modify anything. Output your analysis to stdout.
+
+**Critical output rule:** Your analysis will be captured via --print, which only
+records your final text response. Therefore you MUST accumulate all findings
+internally and produce the COMPLETE analysis as a SINGLE final markdown message.
+Do not output partial findings between tool calls — gather everything first,
+then write the full report at the end. The report MUST start with a markdown
+heading: # Análise omens — YYYY-MM-DD
 EOF
 } > "$PROMPT_FILE"
 

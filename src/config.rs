@@ -142,6 +142,10 @@ pub struct ClubeFiiConfig {
     pub auth_marker: Option<String>,
     #[serde(default)]
     pub protected_probe_url: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 impl Default for ClubeFiiConfig {
@@ -150,6 +154,8 @@ impl Default for ClubeFiiConfig {
             base_url: defaults::clubefii_base_url(),
             auth_marker: None,
             protected_probe_url: None,
+            username: None,
+            password: None,
         }
     }
 }
