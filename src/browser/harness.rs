@@ -186,10 +186,7 @@ impl ChromiumoxideHarness {
             match result {
                 Ok(Ok(val)) => {
                     if elapsed.as_secs() >= 5 {
-                        eprintln!(
-                            "    [cdp] {label}: OK in {:.1}s",
-                            elapsed.as_secs_f64()
-                        );
+                        eprintln!("    [cdp] {label}: OK in {:.1}s", elapsed.as_secs_f64());
                     }
                     Ok(val)
                 }
@@ -201,9 +198,7 @@ impl ChromiumoxideHarness {
                     Err(format!("{label}: {e}"))
                 }
                 Err(_) => {
-                    eprintln!(
-                        "    [cdp] {label}: timed out after {timeout_secs}s"
-                    );
+                    eprintln!("    [cdp] {label}: timed out after {timeout_secs}s");
                     Err(format!("{label}: timed out after {timeout_secs}s"))
                 }
             }
@@ -718,7 +713,11 @@ impl BrowserHarness for ChromiumoxideHarness {
         "#;
 
         let tables: Vec<JsTableInfo> = self
-            .timed_evaluate(tables_js.to_string(), "table scan", CDP_EVALUATE_TIMEOUT_SECS)?
+            .timed_evaluate(
+                tables_js.to_string(),
+                "table scan",
+                CDP_EVALUATE_TIMEOUT_SECS,
+            )?
             .into_value()
             .unwrap_or_default();
 
@@ -752,7 +751,11 @@ impl BrowserHarness for ChromiumoxideHarness {
         "#;
 
         let link_patterns: Vec<JsLinkPattern> = self
-            .timed_evaluate(links_js.to_string(), "link pattern scan", CDP_EVALUATE_TIMEOUT_SECS)?
+            .timed_evaluate(
+                links_js.to_string(),
+                "link pattern scan",
+                CDP_EVALUATE_TIMEOUT_SECS,
+            )?
             .into_value()
             .unwrap_or_default();
 
