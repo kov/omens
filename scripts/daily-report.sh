@@ -152,11 +152,16 @@ payload_json format: [["key","value"], ...]  (sorted key-value pairs)
 Do not write files or modify anything. Output your analysis to stdout.
 
 **Critical output rule:** Your analysis will be captured via --print, which only
-records your final text response. Therefore you MUST accumulate all findings
-internally and produce the COMPLETE analysis as a SINGLE final markdown message.
-Do not output partial findings between tool calls — gather everything first,
-then write the full report at the end. The report MUST start with a markdown
-heading: # Análise omens — YYYY-MM-DD
+records your LAST text response. Therefore:
+1. Do NOT run any background tasks — if a background task completes after your
+   final message, the notification triggers a new response that replaces your
+   report in the --print output. Run ALL commands in the foreground.
+2. Accumulate all findings internally and produce the COMPLETE analysis as a
+   SINGLE final markdown message. Do not output partial findings between tool
+   calls — gather everything first, then write the full report at the end.
+3. The report MUST start with a markdown heading: # Análise omens — YYYY-MM-DD
+4. Your VERY LAST message must be the report itself — do not add any follow-up
+   commentary, summary, or acknowledgment after it.
 EOF
 } > "$PROMPT_FILE"
 
