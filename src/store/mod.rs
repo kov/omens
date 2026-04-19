@@ -120,6 +120,8 @@ pub struct ItemVersionForAnalysis {
     pub stable_key: String,
     pub payload_json: String,
     pub version_count: i64, // 1 = new item, >1 = changed item
+    pub prior_payload_json: Option<String>,
+    pub published_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -604,7 +606,11 @@ impl Store {
             .conn
             .prepare(
                 "SELECT i.id, i.section, COALESCE(i.external_id, ''), i.stable_key, iv.payload_json,
-                        (SELECT COUNT(*) FROM item_versions WHERE item_id = i.id) AS version_count
+                        (SELECT COUNT(*) FROM item_versions WHERE item_id = i.id) AS version_count,
+                        (SELECT iv2.payload_json FROM item_versions iv2
+                         WHERE iv2.item_id = i.id AND iv2.id < iv.id
+                         ORDER BY iv2.id DESC LIMIT 1) AS prior_payload_json,
+                        i.published_at
                  FROM item_versions iv
                  JOIN items i ON i.id = iv.item_id
                  WHERE iv.run_id = ?1",
@@ -620,6 +626,8 @@ impl Store {
                     stable_key: row.get(3)?,
                     payload_json: row.get(4)?,
                     version_count: row.get(5)?,
+                    prior_payload_json: row.get(6)?,
+                    published_at: row.get(7)?,
                 })
             })
             .map_err(|err| format!("failed querying items_for_analysis: {err}"))?;
@@ -627,6 +635,45 @@ impl Store {
         let mut result = Vec::new();
         for row in rows {
             result.push(row.map_err(|err| format!("failed reading analysis row: {err}"))?);
+        }
+        Ok(result)
+    }
+
+    /// Return the most recent comunicado (published_at, payload_json) pairs for a ticker,
+    /// from runs before `before_run_id`, ordered most-recent-first. Used to detect
+    /// same-month republications of the monthly relatório gerencial.
+    pub fn prior_comunicados_for_ticker(
+        &self,
+        ticker: &str,
+        before_run_id: i64,
+    ) -> Result<Vec<(i64, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT i.published_at, iv.payload_json
+                 FROM items i
+                 JOIN item_versions iv ON iv.item_id = i.id
+                   AND iv.id = (
+                     SELECT MAX(iv2.id) FROM item_versions iv2
+                     WHERE iv2.item_id = i.id AND iv2.run_id < ?2
+                   )
+                 WHERE i.section = 'comunicados'
+                   AND i.external_id LIKE ?1 || '/%'
+                   AND i.published_at IS NOT NULL
+                 ORDER BY i.published_at DESC, i.id DESC
+                 LIMIT 30",
+            )
+            .map_err(|err| format!("failed preparing prior_comunicados query: {err}"))?;
+
+        let rows = stmt
+            .query_map(params![ticker, before_run_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|err| format!("failed querying prior_comunicados: {err}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|err| format!("failed reading comunicado row: {err}"))?);
         }
         Ok(result)
     }

@@ -604,27 +604,39 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
                     stable_key: r.stable_key,
                     payload_json: r.payload_json,
                     is_new: r.version_count == 1,
+                    prior_payload_json: r.prior_payload_json,
+                    published_at: r.published_at,
                 })
                 .collect();
 
-            // Build provento history for context-aware scoring (one DB query per ticker).
-            let mut history_map: std::collections::HashMap<
-                String,
-                Vec<analyze::HistoricalProvento>,
-            > = std::collections::HashMap::new();
+            // Build per-ticker history (proventos + comunicados) for context-aware scoring.
+            let mut history_map: std::collections::HashMap<String, analyze::TickerHistory> =
+                std::collections::HashMap::new();
             for item in &analysis_items {
-                if item.section == "proventos" {
-                    let ticker = item.external_id.split('/').next().unwrap_or("");
-                    if !ticker.is_empty() && !history_map.contains_key(ticker) {
-                        let payloads = store
-                            .recent_proventos_for_ticker(ticker, run_id)
-                            .map_err(CliError::fatal)?;
-                        let history = payloads
-                            .iter()
-                            .map(|p| analyze::HistoricalProvento::from_payload(p))
-                            .collect();
-                        history_map.insert(ticker.to_string(), history);
-                    }
+                let ticker = item.external_id.split('/').next().unwrap_or("");
+                if ticker.is_empty() {
+                    continue;
+                }
+                let entry = history_map.entry(ticker.to_string()).or_default();
+                if item.section == "proventos" && entry.proventos.is_empty() {
+                    let payloads = store
+                        .recent_proventos_for_ticker(ticker, run_id)
+                        .map_err(CliError::fatal)?;
+                    entry.proventos = payloads
+                        .iter()
+                        .map(|p| analyze::HistoricalProvento::from_payload(p))
+                        .collect();
+                }
+                if item.section == "comunicados" && entry.comunicados.is_empty() {
+                    let rows = store
+                        .prior_comunicados_for_ticker(ticker, run_id)
+                        .map_err(CliError::fatal)?;
+                    entry.comunicados = rows
+                        .into_iter()
+                        .map(|(ts, payload)| {
+                            analyze::HistoricalComunicado::from_payload(ts, &payload)
+                        })
+                        .collect();
                 }
             }
 

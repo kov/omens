@@ -77,6 +77,52 @@ EOF
         echo ""
         echo "(Report truncated at 50 KB — use the available tools to query additional signals.)"
     fi
+
+    # -------------------------------------------------------------------------
+    # Inject per-ticker 30-day history for every ticker with HIGH/CRITICAL today.
+    # Gives Claude immediate visibility into trends (3rd relatório in a row,
+    # 4th month of NÃO DISTRIBUIÇÃO, etc.) without needing a DB query.
+    # -------------------------------------------------------------------------
+    HISTORY_SQL="
+      WITH high_tickers AS (
+        SELECT DISTINCT substr(i.external_id, 1, instr(i.external_id, '/') - 1) AS ticker
+        FROM signals s
+        JOIN items i ON s.item_id = i.id
+        WHERE s.run_id = (SELECT MAX(id) FROM runs WHERE status = 'success')
+          AND s.severity IN ('critical', 'high')
+      )
+      SELECT
+        substr(i.external_id, 1, instr(i.external_id, '/') - 1) AS ticker,
+        COALESCE(date(i.published_at, 'unixepoch', 'localtime'), '?') AS dt,
+        upper(substr(s.severity, 1, 4)) AS sev,
+        printf('%.2f', s.confidence) AS conf,
+        i.section,
+        replace(replace(s.summary, char(10), ' '), char(13), ' ') AS summary
+      FROM signals s
+      JOIN items i ON s.item_id = i.id
+      WHERE substr(i.external_id, 1, instr(i.external_id, '/') - 1) IN (SELECT ticker FROM high_tickers)
+        AND i.published_at IS NOT NULL
+        AND i.published_at >= strftime('%s', 'now', '-30 days')
+      ORDER BY ticker, i.published_at DESC;
+    "
+    HISTORY=$(sqlite3 -separator $'\t' ~/.omens/db/omens.db "$HISTORY_SQL" 2>/dev/null || true)
+    if [[ -n "$HISTORY" ]]; then
+        echo ""
+        echo "## Contexto histórico (30d por ticker com sinal HIGH/CRITICAL hoje)"
+        echo ""
+        echo "$HISTORY" | awk -F'\t' '
+            BEGIN { prev = "" }
+            {
+                if ($1 != prev) {
+                    if (prev != "") print ""
+                    print "### " $1
+                    prev = $1
+                }
+                printf "- %s %-4s %s %-20s %s\n", $2, $3, $4, $5, $6
+            }
+        '
+    fi
+
     cat <<'EOF'
 
 ## Your task
@@ -113,6 +159,18 @@ unless you have already done so and the answer is not there.
    every proventos signal where the reason isn't obvious, fetch the full text of
    the related comunicado. This is mandatory, not optional.
 
+   **Always-fetch triggers.** A signal whose reasons include any of these keywords
+   MUST have its document fetched — the signal metadata alone is never enough:
+     - assembleia (routine AGO or not — fetch to confirm the pauta)
+     - alteração / fusão / incorporação / liquidação / destituição
+     - fato relevante (any)
+     - NÃO DISTRIBUIÇÃO (first occurrence or resumed)
+
+   Specifically for assembleia signals, the fetched document must yield: date of
+   the assembleia, pauta items, quorum requirements, and whether any pauta item
+   is controversial. Never write "verificar a data"/"consultar a pauta"/
+   "checar o quórum" — that information is in the document.
+
    Step 3a — find the right stable_key:
      sqlite3 ~/.omens/db/omens.db "
        SELECT i.stable_key, i.published_at, iv.payload_json
@@ -127,18 +185,56 @@ unless you have already done so and the answer is not there.
    stripped). Results are cached — subsequent calls for the same document are
    instant. The display session is already running.
 
-4. **Write your finding** — only after steps 1–3. If after fetching the document
-   something is still unclear, say exactly what is missing and why it could not
-   be resolved.
+4. **Write your finding** — only after steps 1–3.
+
+   **Forbidden phrasings.** Never write "verificar X", "checar Y", "consultar o
+   comunicado", "acompanhar a publicação do documento" unless *all* of the
+   following are true: (a) you attempted the fetch, (b) it failed for a concrete
+   technical reason, and (c) you report the failure in the exact form
+   `(fetch falhou: <razão curta, ex.: timeout FNET, 403, PDF corrompido>)`.
+
+   If fetch-doc returned the document but the answer is not there, say exactly
+   what the document covered and what was missing — do not fall back to "verificar".
 
 **Additional queries:**
   ~/.local/bin/omens report since 7d    # compact cross-run signal view
   ~/.local/bin/omens report since 30d   # broader historical context
 
-**Output:** Escreva em português (pt-BR). Relatório conciso em Markdown cobrindo:
-- O que aconteceu de fato (com base nos dados e no texto do documento, não no rótulo do sinal)
-- Para cada ticker com sinal HIGH/CRITICAL: sua conclusão objetiva sobre o que fazer ou monitorar
+**Output format (obrigatório).** Escreva em português (pt-BR) e siga **exatamente**
+esta estrutura — seções nesta ordem, com estes títulos:
+
+```
+# Análise omens — YYYY-MM-DD
+
+## Resumo executivo
+
+- 3 a 6 bullets com o que importa hoje, em ordem de prioridade (o mais acionável
+  primeiro). Cada bullet começa com o TICKER em negrito quando aplicável e
+  termina com uma conclusão objetiva — nunca "verificar"/"checar".
+- Se o dia não tiver nenhum evento acionável, diga "Nada acionável hoje." e liste
+  em uma linha os tickers mais relevantes que foram revisados.
+
+## Sinais não detalhados
+
+Uma linha por sinal MEDIUM ou HIGH que é rotineiro (relatório gerencial sem
+surpresas, provento estável, assembleia de rotina, etc.). Formato:
+
+- **TICKER** — descrição curta em ≤ 1 linha (ex.: "relatório gerencial jan/26
+  publicado, KPIs estáveis" ou "provento R$ 0,85 mantido vs. mês anterior")
+
+Se não houver nenhum, escreva "Nenhum." abaixo do título.
+
+## Análise detalhada
+
+Uma subseção `### TICKER — título do evento` por ticker com sinal HIGH/CRITICAL
+que exija investigação. Cubra:
+- O que aconteceu de fato (com base nos dados e no texto do documento, não no
+  rótulo do sinal)
+- Sua conclusão objetiva sobre o que fazer ou monitorar
 - Se algo genuinamente não pôde ser resolvido: o que falta e por quê
+
+Tickers cuja análise coube no "Sinais não detalhados" **não** devem reaparecer aqui.
+```
 
 ## Database schema
 
@@ -153,14 +249,20 @@ Do not write files or modify anything. Output your analysis to stdout.
 
 **Critical output rule:** Your analysis will be captured via --print, which only
 records your LAST text response. Therefore:
-1. Do NOT run any background tasks — if a background task completes after your
-   final message, the notification triggers a new response that replaces your
-   report in the --print output. Run ALL commands in the foreground.
+1. Do NOT run any background tasks and do NOT let commands auto-background on
+   timeout — set timeout: 600000 (10 minutes) on EVERY Bash tool call. The omens
+   CLI and sqlite3 queries can take several minutes; if a command exceeds the
+   default 2-minute timeout it gets auto-backgrounded, and when it later completes
+   the notification triggers a new response that replaces your report.
 2. Accumulate all findings internally and produce the COMPLETE analysis as a
    SINGLE final markdown message. Do not output partial findings between tool
    calls — gather everything first, then write the full report at the end.
-3. The report MUST start with a markdown heading: # Análise omens — YYYY-MM-DD
-4. Your VERY LAST message must be the report itself — do not add any follow-up
+3. The report MUST start with a markdown heading: `# Análise omens — YYYY-MM-DD`
+   (exact format, no variations like "Relatório" or extra words).
+4. The report MUST follow the Output format above: "Resumo executivo" first,
+   then "Sinais não detalhados", then "Análise detalhada". Do not reorder,
+   rename, or merge these sections.
+5. Your VERY LAST message must be the report itself — do not add any follow-up
    commentary, summary, or acknowledgment after it.
 EOF
 } > "$PROMPT_FILE"
@@ -185,6 +287,7 @@ EOF
                 --print \
                 --dangerously-skip-permissions \
                 --allowedTools Bash \
+                --append-system-prompt "CRITICAL: Set timeout: 600000 on EVERY Bash tool call. Never use run_in_background. Commands that exceed the default 2-minute timeout get auto-backgrounded, and the completion notification will replace your report in --print output." \
             < "$PROMPT_FILE" \
             > "$OUTPUT_FILE.tmp" 2>"$OUTPUT_FILE.stderr" || rc=$?
 

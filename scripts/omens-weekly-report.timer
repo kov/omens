@@ -1,0 +1,9 @@
+[Unit]
+Description=Run omens weekly FII report on Saturdays at 07:00
+
+[Timer]
+OnCalendar=Sat *-*-* 07:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

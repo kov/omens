@@ -1,0 +1,6 @@
+[Unit]
+Description=omens weekly FII report
+
+[Service]
+Type=oneshot
+ExecStart=/home/kov/Projects/omens/scripts/weekly-report.sh
