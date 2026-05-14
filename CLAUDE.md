@@ -11,6 +11,10 @@ cargo run -- report since 30d       # cross-run: signals with published_at in la
 # etc.
 ```
 
+## Storage location
+
+The SQLite database lives at `~/.omens/db/omens.db` (not in the project directory). Use this path for any direct `sqlite3` queries.
+
 ## Skills
 
 - **`/use-omens`** — FII data pipeline (explore → collect → report → analysis). See `skills/use-omens/SKILL.md`.

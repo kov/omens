@@ -35,11 +35,11 @@ where
         // Poll pages() with a short retry loop.
         let mut page = None;
         for _ in 0..20 {
-            if let Ok(pages) = browser.pages().await {
-                if let Some(p) = pages.into_iter().next() {
-                    page = Some(p);
-                    break;
-                }
+            if let Ok(pages) = browser.pages().await
+                && let Some(p) = pages.into_iter().next()
+            {
+                page = Some(p);
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }

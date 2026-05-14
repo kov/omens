@@ -1236,8 +1236,35 @@ pub fn run_all() -> Result<(), CliError> {
     do_report(None)
 }
 
+fn render_markdown_email(markdown: &str) -> String {
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    options.extension.strikethrough = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
+    let body_html = comrak::markdown_to_html(markdown, &options);
+
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.5;max-width:780px;margin:1em auto;padding:0 1em;color:#1f2328}}\
+h1,h2,h3,h4{{margin-top:1.4em;margin-bottom:.4em;line-height:1.25}}\
+h1{{font-size:1.6em;border-bottom:1px solid #d0d7de;padding-bottom:.3em}}\
+h2{{font-size:1.3em;border-bottom:1px solid #d0d7de;padding-bottom:.2em}}\
+code{{background:#f6f8fa;padding:.15em .35em;border-radius:4px;font-size:90%}}\
+pre{{background:#f6f8fa;padding:1em;border-radius:6px;overflow:auto}}\
+pre code{{background:transparent;padding:0}}\
+table{{border-collapse:collapse;margin:1em 0}}\
+th,td{{border:1px solid #d0d7de;padding:.4em .8em;text-align:left}}\
+th{{background:#f6f8fa}}\
+blockquote{{margin:.8em 0;padding:0 1em;color:#59636e;border-left:.25em solid #d0d7de}}\
+a{{color:#0969da}}\
+hr{{border:0;border-top:1px solid #d0d7de;margin:1.2em 0}}\
+</style></head><body>{body_html}</body></html>"
+    )
+}
+
 pub fn send_email(path: String) -> Result<(), CliError> {
-    use lettre::message::header::ContentType;
+    use lettre::message::MultiPart;
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{Message, SmtpTransport, Transport};
     use std::fs;
@@ -1314,9 +1341,9 @@ pub fn send_email(path: String) -> Result<(), CliError> {
         })?);
     }
 
+    let html = render_markdown_email(&body);
     let message = builder
-        .header(ContentType::TEXT_PLAIN)
-        .body(body)
+        .multipart(MultiPart::alternative_plain_html(body, html))
         .map_err(|e| CliError::fatal(format!("failed to build email message: {e}")))?;
 
     let creds = Credentials::new(
@@ -1991,7 +2018,7 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
             for kv in &pairs {
                 if let (Some(k), Some(v)) = (kv.first(), kv.get(1)) {
                     let kl = k.trim();
-                    if keys.iter().any(|&want| kl == want) {
+                    if keys.contains(&kl) {
                         let t = v.trim();
                         if !t.is_empty() && t != "N/D" && t != "N/A" && t != "-" && t != "--" {
                             return Some(t.to_string());
@@ -2098,10 +2125,12 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
     // Navigate directly so Chrome passes any Cloudflare challenge and JS fetch
     // stays same-origin. Chrome renders PDFs in its built-in viewer.
     let doc_is_fnet = is_fnet_url(&doc_url);
-    if doc_is_fnet && !is_fnet_direct {
-        harness.navigate(&doc_url).map_err(CliError::fatal)?;
-        std::thread::sleep(Duration::from_secs(5));
-    } else if !doc_is_fnet && (!is_url || doc_url != url_or_key) {
+    let should_navigate = if doc_is_fnet {
+        !is_fnet_direct
+    } else {
+        !is_url || doc_url != url_or_key
+    };
+    if should_navigate {
         harness.navigate(&doc_url).map_err(CliError::fatal)?;
         std::thread::sleep(Duration::from_secs(5));
     }
@@ -2363,6 +2392,37 @@ fn do_report(since: Option<i64>) -> Result<(), CliError> {
                 println!("    reasons: {}", reasons.join("; "));
             }
         }
+    } else {
+        let low_groups = group_low_signals(&all_signals);
+        if !low_groups.is_empty() {
+            println!("\n--- LOW (fallback: no critical/high/medium) ---");
+            for ((section, kind), sigs) in &low_groups {
+                let tickers: Vec<&str> = sigs
+                    .iter()
+                    .map(|s| ticker_from_stable_key(&s.stable_key))
+                    .collect();
+                if group_is_uniform(sigs) {
+                    let sample = compact_summary(&sigs[0].summary);
+                    println!(
+                        "  {}/{} · {} tickers · {}",
+                        section,
+                        kind,
+                        tickers.len(),
+                        sample
+                    );
+                    println!("    {}", tickers.join(", "));
+                } else {
+                    println!("  {}/{} · {} signals:", section, kind, sigs.len());
+                    for sig in sigs {
+                        println!(
+                            "    {} — {}",
+                            ticker_from_stable_key(&sig.stable_key),
+                            compact_summary(&sig.summary)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let generated_at = store::now_epoch_seconds().map_err(CliError::fatal)?;
@@ -2394,6 +2454,37 @@ fn severity_rank(s: &str) -> u8 {
         "low" => 1,
         _ => 0,
     }
+}
+
+/// Group low-severity signals by (section, kind), preserving first-seen order.
+/// Returned groups omit IGNORE and non-LOW severities.
+fn group_low_signals(all_signals: &[SignalWithItem]) -> Vec<((&str, &str), Vec<&SignalWithItem>)> {
+    let mut groups: Vec<((&str, &str), Vec<&SignalWithItem>)> = Vec::new();
+    for sig in all_signals {
+        if sig.severity != "low" {
+            continue;
+        }
+        let key = (sig.section.as_str(), sig.kind.as_str());
+        if let Some(g) = groups.iter_mut().find(|(k, _)| *k == key) {
+            g.1.push(sig);
+        } else {
+            groups.push((key, vec![sig]));
+        }
+    }
+    groups
+}
+
+/// True when every signal in the group renders to the same compact_summary —
+/// typical for the boilerplate `new item: external_id:*/juros_compostos/DATE`
+/// line that fires once per ticker per day.
+fn group_is_uniform(sigs: &[&SignalWithItem]) -> bool {
+    if sigs.len() <= 1 {
+        return true;
+    }
+    let first = compact_summary(&sigs[0].summary);
+    sigs.iter()
+        .skip(1)
+        .all(|s| compact_summary(&s.summary) == first)
 }
 
 fn build_report_json(
@@ -2492,7 +2583,44 @@ fn build_report_md(
     );
 
     if filtered.is_empty() {
-        let _ = writeln!(md, "\n_No signals._");
+        let low_groups = group_low_signals(all_signals);
+        if low_groups.is_empty() {
+            let _ = writeln!(md, "\n_No signals._");
+            return md;
+        }
+        let _ = writeln!(
+            md,
+            "\n_No critical/high/medium signals. Low-severity fallback summary:_"
+        );
+        let _ = writeln!(md, "\n## Fallback (low-severity)");
+        for ((section, kind), sigs) in &low_groups {
+            let tickers: Vec<&str> = sigs
+                .iter()
+                .map(|s| ticker_from_stable_key(&s.stable_key))
+                .collect();
+            if group_is_uniform(sigs) {
+                let sample = compact_summary(&sigs[0].summary);
+                let _ = writeln!(
+                    md,
+                    "\n- **{}** / {} — {} tickers — _{}_\n  {}",
+                    section,
+                    kind,
+                    tickers.len(),
+                    sample,
+                    tickers.join(", ")
+                );
+            } else {
+                let _ = writeln!(md, "\n- **{}** / {} ({}):", section, kind, sigs.len());
+                for sig in sigs {
+                    let _ = writeln!(
+                        md,
+                        "  - {} — {}",
+                        ticker_from_stable_key(&sig.stable_key),
+                        compact_summary(&sig.summary)
+                    );
+                }
+            }
+        }
         return md;
     }
 
@@ -2693,6 +2821,84 @@ mod tests {
 
         // Reasons present
         assert!(md.contains("fato relevante"), "reasons should appear");
+    }
+
+    #[test]
+    fn report_md_fallback_surfaces_low_signals_when_nothing_escalated() {
+        let make_low = |ticker: &str, section: &str, kind: &str, summary: &str| SignalWithItem {
+            signal_id: 1,
+            run_id: 1,
+            kind: kind.into(),
+            severity: "low".into(),
+            confidence: 0.5,
+            reasons_json: None,
+            summary: summary.into(),
+            item_id: 1,
+            section: section.into(),
+            stable_key: format!("external_id:{ticker}/{section}/whatever"),
+            title: None,
+            url: None,
+            published_at: None,
+        };
+
+        // 3 uniform juros_compostos lows (the daily boilerplate) + 2 distinct patrimonial lows.
+        let a = make_low(
+            "ALZC11",
+            "juros_compostos",
+            "new_item",
+            "new item: external_id:ALZC11/juros_compostos/22/04/2026 (juros_compostos)",
+        );
+        let b = make_low(
+            "BRCR11",
+            "juros_compostos",
+            "new_item",
+            "new item: external_id:BRCR11/juros_compostos/22/04/2026 (juros_compostos)",
+        );
+        let c = make_low(
+            "HGLG11",
+            "juros_compostos",
+            "new_item",
+            "new item: external_id:HGLG11/juros_compostos/22/04/2026 (juros_compostos)",
+        );
+        let d = make_low(
+            "XPML11",
+            "patrimonial",
+            "content_delta",
+            "changed: external_id:XPML11/patrimonial/vacancia|vacancia 7.2 -> 7.5",
+        );
+        let e = make_low(
+            "KNRI11",
+            "patrimonial",
+            "content_delta",
+            "changed: external_id:KNRI11/patrimonial/passivos|passivos revisados",
+        );
+
+        let all = [a, b, c, d, e];
+        let filtered: Vec<&SignalWithItem> = Vec::new();
+        let md = build_report_md(Some(1), 0, &all, &filtered);
+
+        // Not the bare "No signals" case.
+        assert!(!md.contains("_No signals._"));
+        // Fallback banner + heading.
+        assert!(md.contains("Low-severity fallback summary"));
+        assert!(md.contains("## Fallback (low-severity)"));
+        // Uniform group is collapsed with a count and a joined ticker list.
+        assert!(md.contains("juros_compostos"));
+        assert!(md.contains("3 tickers"));
+        assert!(md.contains("ALZC11, BRCR11, HGLG11"));
+        // Non-uniform group lists each signal individually.
+        assert!(md.contains("patrimonial"));
+        assert!(md.contains("XPML11 — vacancia 7.2 -> 7.5"));
+        assert!(md.contains("KNRI11 — passivos revisados"));
+    }
+
+    #[test]
+    fn report_md_no_signals_at_all_stays_minimal() {
+        let all: [SignalWithItem; 0] = [];
+        let filtered: Vec<&SignalWithItem> = Vec::new();
+        let md = build_report_md(Some(1), 0, &all, &filtered);
+        assert!(md.contains("_No signals._"));
+        assert!(!md.contains("Fallback"));
     }
 
     #[test]
