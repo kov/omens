@@ -1,8 +1,8 @@
 [Unit]
-Description=Run omens daily FII report on weekdays at 07:00
+Description=Run omens daily FII report on weekdays at 19:00
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 07:00:00
+OnCalendar=Mon..Fri *-*-* 19:00:00
 Persistent=true
 
 [Install]
