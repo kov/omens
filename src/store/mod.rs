@@ -67,6 +67,10 @@ const MIGRATIONS: &[&str] = &[
         item_id INTEGER,
         created_at INTEGER NOT NULL
     )",
+    // Per-run, per-section extraction tallies (JSON) so a thin scrape — a
+    // section that silently yielded no rows — is visible in the DB without
+    // digging through journald. NULL for runs collected before this migration.
+    "ALTER TABLE runs ADD COLUMN section_counts_json TEXT",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +287,17 @@ impl Store {
                 params![ended_at_epoch, status.as_str(), error_message, run_id],
             )
             .map_err(|err| format!("failed to finalize run {run_id}: {err}"))?;
+        Ok(())
+    }
+
+    /// Record the per-section extraction tally (JSON) for a finished run.
+    pub fn set_run_section_counts(&self, run_id: i64, json: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE runs SET section_counts_json = ?1 WHERE id = ?2",
+                params![json, run_id],
+            )
+            .map_err(|err| format!("failed to store section counts for run {run_id}: {err}"))?;
         Ok(())
     }
 
@@ -1085,6 +1100,42 @@ mod tests {
             .expect("run row should exist");
         assert_eq!(row.0, "success");
         assert_eq!(row.1, Some(20));
+    }
+
+    #[test]
+    fn run_section_counts_roundtrip() {
+        let root = unique_temp_dir("section-counts");
+        fs::create_dir_all(&root).expect("root should exist");
+        let store = Store::open(&root.join("omens.db")).expect("store should open");
+        store.migrate().expect("migrations should work");
+
+        let run_id = store.start_run("news", 10).expect("run row inserted");
+
+        // Fresh runs have no section counts yet.
+        let before: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT section_counts_json FROM runs WHERE id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .expect("query should run");
+        assert_eq!(before, None);
+
+        let json = r#"[{"section":"comunicados","seen":42,"new":1,"changed":0,"tickers":7}]"#;
+        store
+            .set_run_section_counts(run_id, json)
+            .expect("section counts should persist");
+
+        let after: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT section_counts_json FROM runs WHERE id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .expect("query should run");
+        assert_eq!(after.as_deref(), Some(json));
     }
 
     #[test]

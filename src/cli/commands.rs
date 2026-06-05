@@ -7,7 +7,7 @@ use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, Brows
 use crate::runtime::display_manager::DisplayManager;
 use crate::store::{self, LockError, RecipeStatus, RunStatus, SignalWithItem, Store};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::time::{Duration, SystemTime};
 
@@ -50,6 +50,22 @@ struct CollectStats {
     items_seen: usize,
     items_new: usize,
     items_changed: usize,
+    /// Per-section tallies, keyed by section name. Seeded with every active
+    /// recipe section so a section that yields nothing run-wide still appears
+    /// (with 0 rows) — making a silent extraction failure obvious at a glance.
+    sections: BTreeMap<String, SectionCount>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct SectionCount {
+    /// Total rows extracted across all tickers this run.
+    seen: usize,
+    /// Of those, items newly seen for the first time.
+    new: usize,
+    /// Of those, items whose content changed since the prior version.
+    changed: usize,
+    /// Number of distinct tickers that yielded at least one row.
+    tickers: usize,
 }
 
 // ── Command implementations ──────────────────────────────────────────────────
@@ -584,6 +600,28 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
             store
                 .finish_run(run_id, RunStatus::Success, ended, None)
                 .map_err(CliError::fatal)?;
+
+            // Persist per-section tallies so a thin scrape is queryable later
+            // (runs.section_counts_json) without trawling journald.
+            let section_counts: Vec<serde_json::Value> = stats
+                .sections
+                .iter()
+                .map(|(name, c)| {
+                    serde_json::json!({
+                        "section": name,
+                        "seen": c.seen,
+                        "new": c.new,
+                        "changed": c.changed,
+                        "tickers": c.tickers,
+                    })
+                })
+                .collect();
+            if let Ok(json) = serde_json::to_string(&section_counts) {
+                store
+                    .set_run_section_counts(run_id, &json)
+                    .map_err(CliError::fatal)?;
+            }
+
             let retention = store
                 .build_retention_plan(
                     ended,
@@ -700,6 +738,24 @@ pub fn collect_run(sections: Option<String>, tickers: Option<String>) -> Result<
             println!("  items_seen: {}", stats.items_seen);
             println!("  items_new: {}", stats.items_new);
             println!("  items_changed: {}", stats.items_changed);
+
+            if !stats.sections.is_empty() {
+                println!("  sections:");
+                for (name, c) in &stats.sections {
+                    let flag = if c.seen == 0 {
+                        "  [!] no rows extracted"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "    {name:<22} seen={seen:<6} new={new:<4} changed={changed:<4} tickers={tickers}{flag}",
+                        seen = c.seen,
+                        new = c.new,
+                        changed = c.changed,
+                        tickers = c.tickers,
+                    );
+                }
+            }
             println!("  signals: {}{}", signals.len(), breakdown);
             println!(
                 "  retention: runs_deleted={}, versions_deleted={}",
@@ -761,6 +817,7 @@ fn do_collect(
         items_seen: 0,
         items_new: 0,
         items_changed: 0,
+        sections: BTreeMap::new(),
     };
     let mut first = true;
 
@@ -781,6 +838,12 @@ fn do_collect(
             "  no active recipes found; run `omens explore` then `omens explore promote <id>`"
         );
         return Ok(stats);
+    }
+
+    // Seed every active section at zero so a section that yields no rows for any
+    // ticker still appears in the run summary — a silent drop becomes visible.
+    for recipe in &active_recipes {
+        stats.sections.entry(recipe.section.clone()).or_default();
     }
 
     for ticker in tickers {
@@ -830,6 +893,13 @@ fn do_collect(
 
             let section = &recipe.section;
             println!("  [{ticker}/{section}] extracting...");
+
+            // Snapshot tallies so we can attribute this ticker+section's rows
+            // below. Early `continue` paths (tab absent, empty recipe) extract
+            // nothing, so skipping the attribution there leaves a correct 0.
+            let seen_before = stats.items_seen;
+            let new_before = stats.items_new;
+            let changed_before = stats.items_changed;
 
             // Click the tab anchor
             let click_sel = format!("a[href='#{section}']");
@@ -1100,6 +1170,18 @@ fn do_collect(
                 }
             } else {
                 println!("    skip: no extractable table or repeating group in recipe");
+            }
+
+            // Attribute this ticker+section's rows to the run summary.
+            let d_seen = stats.items_seen - seen_before;
+            let d_new = stats.items_new - new_before;
+            let d_changed = stats.items_changed - changed_before;
+            let entry = stats.sections.entry(section.clone()).or_default();
+            entry.seen += d_seen;
+            entry.new += d_new;
+            entry.changed += d_changed;
+            if d_seen > 0 {
+                entry.tickers += 1;
             }
         }
 
