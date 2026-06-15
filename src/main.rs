@@ -1,12 +1,10 @@
 mod analyze;
 mod auth;
-mod browse;
 mod browser;
 mod chat;
 mod cli;
 mod config;
 mod explore;
-mod runtime;
 mod store;
 
 fn main() {

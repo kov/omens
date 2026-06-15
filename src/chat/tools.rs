@@ -1,5 +1,5 @@
-use crate::browse::{collapse_blank_lines, find_elements_js, truncate_str};
 use crate::browser::harness::{BrowserHarness, ScrollDirection};
+use caravela::cdp::{collapse_blank_lines, find_elements_js, truncate_str};
 use serde_json::{Value, json};
 
 pub fn tool_definitions() -> Vec<Value> {

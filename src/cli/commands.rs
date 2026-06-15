@@ -3,15 +3,38 @@ use crate::auth::{self, AuthError, AuthValidationConfig, EphemeralProfile};
 use crate::browser::harness::{BrowserHarness, ChromiumoxideHarness, TabSummary};
 use crate::config::{self, DoctorIssueSeverity, OmensConfig};
 use crate::explore::fixtures::FixtureWriter;
-use crate::runtime::browser_manager::{BrowserInstallState, BrowserManager, BrowserMode};
-use crate::runtime::display_manager::DisplayManager;
 use crate::store::{self, LockError, RecipeStatus, RunStatus, SignalWithItem, Store};
+use caravela::CaravelaConfig;
+use caravela::browser::{BrowserInstallState, BrowserManager};
+use caravela::config::BrowserMode;
+use caravela::display::DisplayManager;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::time::{Duration, SystemTime};
 
 use super::CliError;
+
+/// Build a caravela configuration from omens' loaded config, rooted at omens'
+/// state directory (`~/.omens`) so caravela reuses omens' existing Chromium
+/// install, browser profile, and display layout.
+fn caravela_config(loaded: &OmensConfig) -> CaravelaConfig {
+    let mut cc = CaravelaConfig::with_root(&loaded.resolved.root_dir);
+    cc.browser.mode = match loaded.browser.mode.as_str() {
+        "bundled" => BrowserMode::Bundled,
+        _ => BrowserMode::System,
+    };
+    cc.browser.system_binary_path = loaded
+        .browser
+        .system_binary_path
+        .clone()
+        .map(std::path::PathBuf::from);
+    cc.browser.bundled_build = loaded.browser.bundled_build;
+    cc.browser.user_data_dir = Some(loaded.resolved.browser_user_data_dir.clone());
+    cc.browser.extra_args = loaded.browser.extra_args.clone();
+    cc.browser.max_page_chars = loaded.browser.max_page_chars;
+    cc
+}
 
 fn is_fnet_url(url: &str) -> bool {
     url.contains("fnet.bmfbovespa.com.br")
@@ -74,7 +97,8 @@ pub fn auth_bootstrap(ephemeral: bool, system_display: bool) -> Result<(), CliEr
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
 
     let ephemeral_root = loaded.resolved.root_dir.join("browser/profiles/ephemeral");
@@ -154,7 +178,8 @@ pub fn browser_open(
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
 
     let profile_path = manager.default_profile_dir().to_path_buf();
@@ -211,7 +236,8 @@ pub fn explore_start(url: String) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
     let profile_path = manager.default_profile_dir().to_path_buf();
     std::fs::create_dir_all(&profile_path).map_err(|err| {
@@ -795,7 +821,8 @@ fn do_collect(
     tickers: &[String],
     section_filter: Option<&[String]>,
 ) -> Result<CollectStats, String> {
-    let manager = BrowserManager::from_config(loaded).map_err(|e| e.to_string())?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(loaded)).map_err(|e| e.to_string())?;
     let browser_binary = manager.browser_binary_path().map_err(|e| e.to_string())?;
     let profile_path = manager.default_profile_dir().to_path_buf();
     std::fs::create_dir_all(&profile_path)
@@ -1464,7 +1491,8 @@ pub fn chat(system_display: bool) -> Result<(), CliError> {
         ));
     }
 
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
 
     let profile_path = manager.default_profile_dir().to_path_buf();
@@ -1491,121 +1519,6 @@ pub fn chat(system_display: bool) -> Result<(), CliError> {
     result.map_err(CliError::fatal)
 }
 
-pub fn browse(cmd: super::BrowseCommand) -> Result<(), CliError> {
-    use crate::browse;
-    use crate::browse::session::BrowseSessionManager;
-
-    let loaded = config::load_default_config().map_err(CliError::fatal)?;
-    config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
-
-    let session_mgr = BrowseSessionManager::new(&loaded.resolved.root_dir);
-
-    match cmd {
-        super::BrowseCommand::Start {
-            port,
-            system_display,
-        } => {
-            let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
-            let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
-            let profile_dir = manager.default_profile_dir().to_path_buf();
-
-            let launch_env = display_launch_env(&loaded.resolved.root_dir, system_display)?;
-
-            let mut extra_args = loaded.browser.extra_args.clone();
-            if !launch_env.is_empty() {
-                extra_args.push("--ozone-platform=wayland".to_string());
-                extra_args.push("--force-device-scale-factor=1".to_string());
-            }
-
-            let session = session_mgr
-                .start(
-                    &browser_binary,
-                    &profile_dir,
-                    port,
-                    &launch_env,
-                    &extra_args,
-                )
-                .map_err(CliError::fatal)?;
-
-            println!("browse session started");
-            println!("  pid: {}", session.pid);
-            println!("  port: {}", session.port);
-            println!("  profile: {}", session.profile_dir.display());
-            Ok(())
-        }
-        super::BrowseCommand::Stop => {
-            session_mgr.stop().map_err(CliError::fatal)?;
-            println!("browse session stopped");
-            Ok(())
-        }
-        super::BrowseCommand::Status => {
-            match session_mgr.status().map_err(CliError::fatal)? {
-                Some(session) => {
-                    println!("browse session running");
-                    println!("  pid: {}", session.pid);
-                    println!("  port: {}", session.port);
-                    println!("  profile: {}", session.profile_dir.display());
-                }
-                None => {
-                    println!("browse session not running");
-                }
-            }
-            Ok(())
-        }
-        super::BrowseCommand::Navigate { url } => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::navigate(port, &url).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Content { max_chars, full } => {
-            let port = require_session(&session_mgr)?.port;
-            let max = if max_chars > 0 {
-                max_chars
-            } else {
-                loaded.browser.max_page_chars
-            };
-            browse::commands::content(port, max, full).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Click { selector } => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::click(port, &selector).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Type { selector, text } => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::type_text(port, &selector, &text).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Find {
-            selector,
-            max_results,
-        } => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::find(port, &selector, max_results).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Scroll { direction, pixels } => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::scroll(port, direction, pixels).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Eval { expression } => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::eval(port, &expression).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Links {
-            contains,
-            max_results,
-        } => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::links(port, contains.as_deref(), max_results).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Source => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::source(port).map_err(CliError::fatal)
-        }
-        super::BrowseCommand::Url => {
-            let port = require_session(&session_mgr)?.port;
-            browse::commands::url(port).map_err(CliError::fatal)
-        }
-    }
-}
-
 /// Returns display environment variables for browser launch.
 ///
 /// When `system_display` is true, inherits the caller's display environment
@@ -1622,17 +1535,11 @@ fn display_launch_env(
         return Ok(vec![]);
     }
 
-    let dm = DisplayManager::new(root_dir);
+    let dm = DisplayManager::new(root_dir.join("display"));
     let session = dm
-        .ensure_running(crate::runtime::display_manager::DEFAULT_LISTEN_ADDR)
+        .ensure_running(caravela::display::DEFAULT_LISTEN_ADDR)
         .map_err(CliError::fatal)?;
-    Ok(vec![
-        (
-            "XDG_RUNTIME_DIR".to_string(),
-            session.runtime_dir.display().to_string(),
-        ),
-        ("WAYLAND_DISPLAY".to_string(), session.wayland_socket),
-    ])
+    Ok(DisplayManager::launch_env(&session))
 }
 
 /// Check whether the current clubefii page indicates the user is not logged in
@@ -1772,14 +1679,6 @@ fn auto_login(
     ))
 }
 
-fn require_session(
-    mgr: &crate::browse::session::BrowseSessionManager,
-) -> Result<crate::browse::session::BrowseSession, CliError> {
-    mgr.status()
-        .map_err(CliError::fatal)?
-        .ok_or_else(|| CliError::fatal("no browse session running; run `omens browse start`"))
-}
-
 pub fn config_doctor() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
@@ -1812,7 +1711,8 @@ pub fn browser_status() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
 
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let status = manager.status();
     let mode = match status.mode {
         BrowserMode::Bundled => "bundled",
@@ -1844,7 +1744,8 @@ pub fn browser_status() -> Result<(), CliError> {
 pub fn browser_install(force: bool) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let status = manager.install(force).map_err(CliError::fatal)?;
     print_browser_status_result("browser install", &status);
     Ok(())
@@ -1853,7 +1754,8 @@ pub fn browser_install(force: bool) -> Result<(), CliError> {
 pub fn browser_upgrade() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let status = manager.upgrade().map_err(CliError::fatal)?;
     print_browser_status_result("browser upgrade", &status);
     Ok(())
@@ -1862,7 +1764,8 @@ pub fn browser_upgrade() -> Result<(), CliError> {
 pub fn browser_rollback() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let status = manager.rollback().map_err(CliError::fatal)?;
     print_browser_status_result("browser rollback", &status);
     Ok(())
@@ -1871,7 +1774,8 @@ pub fn browser_rollback() -> Result<(), CliError> {
 pub fn browser_reset_profile() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     manager.reset_profile().map_err(CliError::fatal)?;
     println!(
         "browser reset-profile completed: {}",
@@ -1883,7 +1787,7 @@ pub fn browser_reset_profile() -> Result<(), CliError> {
 pub fn display_start(listen_addr: String) -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
     config::bootstrap_layout(&loaded).map_err(CliError::fatal)?;
-    let manager = DisplayManager::new(&loaded.resolved.root_dir);
+    let manager = DisplayManager::new(loaded.resolved.root_dir.join("display"));
     let session = manager
         .start(listen_addr.as_str())
         .map_err(CliError::fatal)?;
@@ -1897,7 +1801,7 @@ pub fn display_start(listen_addr: String) -> Result<(), CliError> {
 
 pub fn display_stop() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
-    let manager = DisplayManager::new(&loaded.resolved.root_dir);
+    let manager = DisplayManager::new(loaded.resolved.root_dir.join("display"));
     manager.stop().map_err(CliError::fatal)?;
     println!("display stop: session terminated");
     Ok(())
@@ -1905,7 +1809,7 @@ pub fn display_stop() -> Result<(), CliError> {
 
 pub fn display_status() -> Result<(), CliError> {
     let loaded = config::load_default_config().map_err(CliError::fatal)?;
-    let manager = DisplayManager::new(&loaded.resolved.root_dir);
+    let manager = DisplayManager::new(loaded.resolved.root_dir.join("display"));
     let status = manager.status().map_err(CliError::fatal)?;
     println!("display status");
     if let Some(session) = status.session {
@@ -2017,7 +1921,8 @@ pub fn fetch_doc(url_or_key: String) -> Result<(), CliError> {
     }
 
     // Set up browser (needed for both stable_key lookup and authenticated fetch).
-    let manager = BrowserManager::from_config(&loaded).map_err(CliError::fatal)?;
+    let manager =
+        BrowserManager::from_config(&caravela_config(&loaded)).map_err(CliError::fatal)?;
     let browser_binary = manager.browser_binary_path().map_err(CliError::fatal)?;
     let profile_path = manager.default_profile_dir().to_path_buf();
 

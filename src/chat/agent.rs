@@ -222,5 +222,5 @@ fn trim_history(input: &mut Vec<Value>, max_items: usize) {
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    crate::browse::truncate_str(s, max)
+    caravela::cdp::truncate_str(s, max)
 }

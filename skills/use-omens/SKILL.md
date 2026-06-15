@@ -166,6 +166,19 @@ cargo run -- collect run                          # uses config tickers
 cargo run -- collect run --tickers BRCR11 --sections comunicados,proventos
 ```
 
+> **Avoid single-ticker `collect run` for ad-hoc investigations.** It registers
+> as today's run, which (a) makes `daily-report.sh` skip the full daily collect
+> (it checks `runs WHERE date(started_at)=today AND status='success'`), and
+> (b) narrows `report latest` to only that ticker. To investigate one ticker
+> without poisoning the daily pipeline, prefer:
+> - `report since 30d` — cross-run, all tickers, filtered by `published_at`
+> - Direct SQL on `~/.omens/db/omens.db` (see [Investigating the Database](#investigating-the-database))
+> - `fetch-doc` for full text of a known comunicado
+>
+> If you really need fresh data for one ticker, run the full pipeline
+> (`cargo run -- run`) instead, or run the single-ticker collect only after
+> confirming today's daily collect already ran.
+
 Output summary:
 
 ```
@@ -309,8 +322,10 @@ then published_at descending.
 ## Browse — Interactive Web Exploration
 
 For interactive browser automation (navigating sites, extracting content,
-clicking elements), use `/browse`. The browse session shares the same display
-and browser infrastructure as the collect pipeline.
+clicking elements), use `/browse`, provided by the **caravela** tool. omens
+shares caravela's browser + display infrastructure, so a caravela `browse`
+session and the collect pipeline use the same Chromium install and profile
+(login state) under `~/.omens`.
 
 ---
 

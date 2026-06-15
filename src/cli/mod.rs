@@ -1,7 +1,5 @@
 mod commands;
 
-use crate::browser::harness::ScrollDirection;
-
 pub const EX_FATAL: i32 = 40;
 pub const EX_AUTH_REQUIRED: i32 = 20;
 pub const EX_LOCK_CONFLICT: i32 = 30;
@@ -72,7 +70,6 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
         Command::FetchDoc { url_or_key } => commands::fetch_doc(url_or_key),
         Command::SendEmail { path } => commands::send_email(path),
         Command::Chat { system_display } => commands::chat(system_display),
-        Command::Browse(sub) => commands::browse(sub),
         Command::ConfigDoctor => commands::config_doctor(),
         Command::Help { topic } => {
             print_usage(topic);
@@ -97,7 +94,6 @@ fn print_usage(topic: HelpTopic) {
   omens fetch-doc <url-or-stable-key>\n  \
   omens send-email <file>\n  \
   omens chat [--system-display]\n  \
-  omens browse start|stop|status|navigate|content|click|...\n  \
   omens config doctor\n  \
   omens browser open [url] [--system-display] [-- CHROMIUM_ARGS...]\n  \
   omens browser status|install|upgrade|rollback|reset-profile\n  \
@@ -120,24 +116,6 @@ fn print_usage(topic: HelpTopic) {
         }
         HelpTopic::Chat => println!("Usage:\n  omens chat [--system-display]"),
         HelpTopic::Config => println!("Usage:\n  omens config doctor"),
-        HelpTopic::Browse => {
-            println!(
-                "Usage:\n  \
-  omens browse start [--port PORT] [--system-display]\n  \
-  omens browse stop\n  \
-  omens browse status\n  \
-  omens browse navigate <url>\n  \
-  omens browse content [--max-chars N] [--full]\n  \
-  omens browse links [--contains TEXT] [--max N]\n  \
-  omens browse click <selector>\n  \
-  omens browse type <selector> <text>\n  \
-  omens browse find <selector> [--max N]\n  \
-  omens browse scroll <up|down> [pixels]\n  \
-  omens browse eval <expression>\n  \
-  omens browse source\n  \
-  omens browse url"
-            )
-        }
         HelpTopic::Browser => {
             println!(
                 "Usage:\n  omens browser open [url] [--system-display] [-- CHROMIUM_ARGS...]\n  omens browser status|install [--force]|upgrade|rollback|reset-profile"
@@ -158,7 +136,6 @@ enum HelpTopic {
     Report,
     Chat,
     Config,
-    Browse,
     Browser,
     Display,
 }
@@ -206,7 +183,6 @@ enum Command {
         extra_args: Vec<String>,
     },
     BrowserResetProfile,
-    Browse(BrowseCommand),
     DisplayStart {
         listen_addr: String,
     },
@@ -215,47 +191,6 @@ enum Command {
     Help {
         topic: HelpTopic,
     },
-}
-
-#[derive(Debug, Clone)]
-pub enum BrowseCommand {
-    Start {
-        port: u16,
-        system_display: bool,
-    },
-    Stop,
-    Status,
-    Navigate {
-        url: String,
-    },
-    Content {
-        max_chars: u32,
-        full: bool,
-    },
-    Click {
-        selector: String,
-    },
-    Type {
-        selector: String,
-        text: String,
-    },
-    Find {
-        selector: String,
-        max_results: usize,
-    },
-    Scroll {
-        direction: ScrollDirection,
-        pixels: u32,
-    },
-    Eval {
-        expression: String,
-    },
-    Links {
-        contains: Option<String>,
-        max_results: usize,
-    },
-    Source,
-    Url,
 }
 
 impl Command {
@@ -293,7 +228,6 @@ impl Command {
             "send-email" => parse_send_email(args),
             "chat" => parse_chat(args),
             "config" => parse_config(args),
-            "browse" => parse_browse(args),
             "browser" => parse_browser(args),
             "display" => parse_display(args),
             _ => Err("unknown command. run `omens --help`".to_string()),
@@ -310,7 +244,6 @@ fn parse_help_topic(raw: Option<&str>) -> Result<HelpTopic, String> {
         Some("report") => Ok(HelpTopic::Report),
         Some("chat") => Ok(HelpTopic::Chat),
         Some("config") => Ok(HelpTopic::Config),
-        Some("browse") => Ok(HelpTopic::Browse),
         Some("browser") => Ok(HelpTopic::Browser),
         Some("display") => Ok(HelpTopic::Display),
         Some(other) => Err(format!("unknown help topic `{other}`")),
@@ -481,211 +414,6 @@ fn parse_config(args: &[String]) -> Result<Command, String> {
         });
     }
     Err("usage: omens config doctor".to_string())
-}
-
-fn parse_browse(args: &[String]) -> Result<Command, String> {
-    if args.len() == 3 && is_help(args[2].as_str()) {
-        return Ok(Command::Help {
-            topic: HelpTopic::Browse,
-        });
-    }
-
-    if args.len() < 3 {
-        return Err("usage: omens browse <subcommand>. run `omens browse --help`".to_string());
-    }
-
-    match args[2].as_str() {
-        "start" => {
-            let mut port = 9222u16;
-            let mut system_display = false;
-            let mut i = 3usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--port" => {
-                        let val = args
-                            .get(i + 1)
-                            .ok_or_else(|| "missing value after --port".to_string())?;
-                        port = val
-                            .parse::<u16>()
-                            .map_err(|_| format!("invalid port: {val}"))?;
-                        i += 2;
-                    }
-                    "--system-display" => {
-                        system_display = true;
-                        i += 1;
-                    }
-                    _ => {
-                        return Err("usage: omens browse start [--port PORT] [--system-display]"
-                            .to_string());
-                    }
-                }
-            }
-            Ok(Command::Browse(BrowseCommand::Start {
-                port,
-                system_display,
-            }))
-        }
-        "stop" => {
-            if args.len() != 3 {
-                return Err("usage: omens browse stop".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Stop))
-        }
-        "status" => {
-            if args.len() != 3 {
-                return Err("usage: omens browse status".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Status))
-        }
-        "navigate" => {
-            if args.len() != 4 {
-                return Err("usage: omens browse navigate <url>".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Navigate {
-                url: args[3].clone(),
-            }))
-        }
-        "content" => {
-            let mut max_chars = 0u32; // 0 = use default from config
-            let mut full = false;
-            let mut i = 3usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--max-chars" => {
-                        let val = args
-                            .get(i + 1)
-                            .ok_or_else(|| "missing value after --max-chars".to_string())?;
-                        max_chars = val
-                            .parse::<u32>()
-                            .map_err(|_| format!("invalid --max-chars value: {val}"))?;
-                        i += 2;
-                    }
-                    "--full" => {
-                        full = true;
-                        i += 1;
-                    }
-                    _ => {
-                        return Err(
-                            "usage: omens browse content [--max-chars N] [--full]".to_string()
-                        );
-                    }
-                }
-            }
-            Ok(Command::Browse(BrowseCommand::Content { max_chars, full }))
-        }
-        "click" => {
-            if args.len() != 4 {
-                return Err("usage: omens browse click <selector>".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Click {
-                selector: args[3].clone(),
-            }))
-        }
-        "type" => {
-            if args.len() != 5 {
-                return Err("usage: omens browse type <selector> <text>".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Type {
-                selector: args[3].clone(),
-                text: args[4].clone(),
-            }))
-        }
-        "find" => {
-            if args.len() < 4 {
-                return Err("usage: omens browse find <selector> [--max N]".to_string());
-            }
-            let selector = args[3].clone();
-            let mut max_results = 20usize;
-            let mut i = 4usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--max" => {
-                        let val = args
-                            .get(i + 1)
-                            .ok_or_else(|| "missing value after --max".to_string())?;
-                        max_results = val
-                            .parse::<usize>()
-                            .map_err(|_| format!("invalid --max value: {val}"))?;
-                        i += 2;
-                    }
-                    _ => return Err("usage: omens browse find <selector> [--max N]".to_string()),
-                }
-            }
-            Ok(Command::Browse(BrowseCommand::Find {
-                selector,
-                max_results,
-            }))
-        }
-        "scroll" => {
-            if args.len() < 4 || args.len() > 5 {
-                return Err("usage: omens browse scroll <up|down> [pixels]".to_string());
-            }
-            let direction = ScrollDirection::parse(&args[3])?;
-            let pixels = if args.len() == 5 {
-                args[4]
-                    .parse::<u32>()
-                    .map_err(|_| format!("invalid pixels value: {}", args[4]))?
-            } else {
-                600
-            };
-            Ok(Command::Browse(BrowseCommand::Scroll { direction, pixels }))
-        }
-        "eval" => {
-            if args.len() != 4 {
-                return Err("usage: omens browse eval <expression>".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Eval {
-                expression: args[3].clone(),
-            }))
-        }
-        "links" => {
-            let mut contains = None::<String>;
-            let mut max_results = 200usize;
-            let mut i = 3usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--contains" => {
-                        let val = args
-                            .get(i + 1)
-                            .ok_or_else(|| "missing value after --contains".to_string())?;
-                        contains = Some(val.clone());
-                        i += 2;
-                    }
-                    "--max" => {
-                        let val = args
-                            .get(i + 1)
-                            .ok_or_else(|| "missing value after --max".to_string())?;
-                        max_results = val
-                            .parse::<usize>()
-                            .map_err(|_| format!("invalid --max value: {val}"))?;
-                        i += 2;
-                    }
-                    _ => {
-                        return Err(
-                            "usage: omens browse links [--contains TEXT] [--max N]".to_string()
-                        );
-                    }
-                }
-            }
-            Ok(Command::Browse(BrowseCommand::Links {
-                contains,
-                max_results,
-            }))
-        }
-        "source" => {
-            if args.len() != 3 {
-                return Err("usage: omens browse source".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Source))
-        }
-        "url" => {
-            if args.len() != 3 {
-                return Err("usage: omens browse url".to_string());
-            }
-            Ok(Command::Browse(BrowseCommand::Url))
-        }
-        _ => Err("unknown browse subcommand. run `omens browse --help`".to_string()),
-    }
 }
 
 fn parse_browser(args: &[String]) -> Result<Command, String> {
